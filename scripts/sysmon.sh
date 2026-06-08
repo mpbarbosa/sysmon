@@ -13,7 +13,7 @@ fi
 prev_idle=$((idle + iowait))
 prev_total=$((user + nice + system + idle + iowait + irq + softirq + steal))
 
-sleep 0.2
+sleep 0.1
 
 if ! read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat; then
   printf '{"cpu":0.00,"memory":0.00}\n'
@@ -34,7 +34,16 @@ fi
 read -r mem_total_kb mem_available_kb < <(awk '
   /^MemTotal:/ { total = $2 }
   /^MemAvailable:/ { available = $2 }
-  END { printf "%s %s\n", total, available }
+  /^MemFree:/ { free = $2 }
+  /^Buffers:/ { buffers = $2 }
+  /^Cached:/ { cached = $2 }
+  END {
+    if (available == "") {
+      available = free + buffers + cached
+    }
+
+    printf "%s %s\n", total, available
+  }
 ' /proc/meminfo)
 mem_used_percent=$(awk -v total="$mem_total_kb" -v avail="$mem_available_kb" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", ((total - avail) / total) * 100 } }')
 
