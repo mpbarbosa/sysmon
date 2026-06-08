@@ -63,7 +63,7 @@ PanelWindow {
                 ProgressBar {
                     from: 0
                     to: 1
-                    value: root.clampPercent(root.cpuUsage) / 100
+                    value: Math.max(0, Math.min(1, root.clampPercent(root.cpuUsage) / 100))
                     width: parent.width
                     Accessible.name: root.cpuAccessibleName
                 }
@@ -77,7 +77,7 @@ PanelWindow {
                 ProgressBar {
                     from: 0
                     to: 1
-                    value: root.clampPercent(root.memoryUsage) / 100
+                    value: Math.max(0, Math.min(1, root.clampPercent(root.memoryUsage) / 100))
                     width: parent.width
                     Accessible.name: root.memoryAccessibleName
                 }
