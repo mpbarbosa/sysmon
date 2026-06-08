@@ -56,6 +56,7 @@ PanelWindow {
                     to: 1
                     value: root.cpuUsage / 100
                     width: parent.width
+                    Accessible.name: "CPU usage progress bar"
                 }
 
                 Text {
@@ -69,6 +70,7 @@ PanelWindow {
                     to: 1
                     value: root.memoryUsage / 100
                     width: parent.width
+                    Accessible.name: "Memory usage progress bar"
                 }
             }
         }
