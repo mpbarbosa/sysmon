@@ -6,7 +6,7 @@ if [[ ! -r /proc/stat || ! -r /proc/meminfo ]]; then
   exit 0
 fi
 
-if ! read -r cpu_label user nice system idle iowait irq softirq steal _ < /proc/stat; then
+if ! read -r unused_cpu_label user nice system idle iowait irq softirq steal _ < /proc/stat; then
   printf '{"cpu":0.00,"memory":0.00}\n'
   exit 0
 fi
@@ -15,7 +15,7 @@ prev_total=$((user + nice + system + idle + iowait + irq + softirq + steal))
 
 sleep 0.1
 
-if ! read -r cpu_label user nice system idle iowait irq softirq steal _ < /proc/stat; then
+if ! read -r unused_cpu_label user nice system idle iowait irq softirq steal _ < /proc/stat; then
   printf '{"cpu":0.00,"memory":0.00}\n'
   exit 0
 fi
