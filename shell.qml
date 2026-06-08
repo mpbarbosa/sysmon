@@ -22,6 +22,8 @@ PanelWindow {
 
     property real cpuUsage: 0
     property real memoryUsage: 0
+    property string cpuAccessibleName: "CPU usage: " + root.cpuUsage.toFixed(1) + "%"
+    property string memoryAccessibleName: "Memory usage: " + root.memoryUsage.toFixed(1) + "%"
     property string monitorScriptPath: {
         var url = Qt.resolvedUrl("scripts/sysmon.sh").toString();
         if (url.startsWith("file://")) {
@@ -63,7 +65,7 @@ PanelWindow {
                     to: 1
                     value: root.clampPercent(root.cpuUsage) / 100
                     width: parent.width
-                    Accessible.name: "CPU usage: " + root.cpuUsage.toFixed(1) + "%"
+                    Accessible.name: root.cpuAccessibleName
                 }
 
                 Text {
@@ -77,7 +79,7 @@ PanelWindow {
                     to: 1
                     value: root.clampPercent(root.memoryUsage) / 100
                     width: parent.width
-                    Accessible.name: "Memory usage: " + root.memoryUsage.toFixed(1) + "%"
+                    Accessible.name: root.memoryAccessibleName
                 }
             }
         }

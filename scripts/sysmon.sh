@@ -13,6 +13,7 @@ fi
 prev_idle=$((idle + iowait))
 prev_total=$((user + nice + system + idle + iowait + irq + softirq + steal))
 
+# Short delay to sample CPU counters twice and compute usage delta.
 sleep 0.1
 
 if ! read -r unused_cpu_label user nice system idle iowait irq softirq steal _ < /proc/stat; then
