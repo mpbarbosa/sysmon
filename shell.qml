@@ -22,7 +22,14 @@ PanelWindow {
 
     property real cpuUsage: 0
     property real memoryUsage: 0
-    property string monitorScriptPath: Qt.resolvedUrl("scripts/sysmon.sh").toString().replace("file://", "")
+    property string monitorScriptPath: {
+        var url = Qt.resolvedUrl("scripts/sysmon.sh").toString();
+        if (url.startsWith("file://")) {
+            return decodeURIComponent(url.slice(7));
+        }
+
+        return url;
+    }
 
     Rectangle {
         anchors.fill: parent
@@ -56,7 +63,7 @@ PanelWindow {
                     to: 1
                     value: root.cpuUsage / 100
                     width: parent.width
-                    Accessible.name: "CPU usage progress bar"
+                    Accessible.name: "CPU usage: " + root.cpuUsage.toFixed(1) + " percent"
                 }
 
                 Text {
@@ -70,7 +77,7 @@ PanelWindow {
                     to: 1
                     value: root.memoryUsage / 100
                     width: parent.width
-                    Accessible.name: "Memory usage progress bar"
+                    Accessible.name: "Memory usage: " + root.memoryUsage.toFixed(1) + " percent"
                 }
             }
         }
