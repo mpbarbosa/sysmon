@@ -63,7 +63,7 @@ PanelWindow {
                     to: 1
                     value: root.cpuUsage / 100
                     width: parent.width
-                    Accessible.name: Qt.binding(function() { return "CPU usage: " + root.cpuUsage.toFixed(1) + " percent"; })
+                    Accessible.name: "CPU usage: " + root.cpuUsage.toFixed(1) + " percent"
                 }
 
                 Text {
@@ -77,7 +77,7 @@ PanelWindow {
                     to: 1
                     value: root.memoryUsage / 100
                     width: parent.width
-                    Accessible.name: Qt.binding(function() { return "Memory usage: " + root.memoryUsage.toFixed(1) + " percent"; })
+                    Accessible.name: "Memory usage: " + root.memoryUsage.toFixed(1) + " percent"
                 }
             }
         }

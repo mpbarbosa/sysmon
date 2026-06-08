@@ -31,7 +31,7 @@ else
   cpu_usage=$(awk -v idle="$delta_idle" -v total="$delta_total" 'BEGIN { printf "%.2f", (1 - idle / total) * 100 }')
 fi
 
-read -r mem_total_kb mem_available_kb < <(awk '
+read -r mem_total mem_available < <(awk '
   /^MemTotal:/ { total = $2 }
   /^MemAvailable:/ { available = $2 }
   /^MemFree:/ { free = $2 }
@@ -45,6 +45,6 @@ read -r mem_total_kb mem_available_kb < <(awk '
     printf "%s %s\n", total, available
   }
 ' /proc/meminfo)
-mem_used_percent=$(awk -v total="$mem_total_kb" -v avail="$mem_available_kb" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", ((total - avail) / total) * 100 } }')
+mem_used_percent=$(awk -v total="$mem_total" -v avail="$mem_available" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", ((total - avail) / total) * 100 } }')
 
 printf '{"cpu":%s,"memory":%s}\n' "$cpu_usage" "$mem_used_percent"
