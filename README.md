@@ -4,8 +4,8 @@ A shell desktop widget developed with **Quickshell** and **qmlls** to show CPU a
 
 ## Files
 
-- `/tmp/workspace/mpbarbosa/sysmon/shell.qml`: Quickshell panel that renders CPU and memory usage.
-- `/tmp/workspace/mpbarbosa/sysmon/scripts/sysmon.sh`: Linux metrics collector (reads `/proc/stat` and `/proc/meminfo`).
+- `shell.qml`: Quickshell panel that renders CPU and memory usage.
+- `scripts/sysmon.sh`: Linux metrics collector (reads `/proc/stat` and `/proc/meminfo`).
 
 ## Run
 
@@ -13,13 +13,13 @@ A shell desktop widget developed with **Quickshell** and **qmlls** to show CPU a
 2. From this repository, run:
 
    ```bash
-   quickshell -p /tmp/workspace/mpbarbosa/sysmon/shell.qml
+   quickshell -p shell.qml
    ```
 
 ## qmlls setup
 
 Use your editor's QML language server (`qmlls`) with this repository opened at:
 
-`/tmp/workspace/mpbarbosa/sysmon`
+`<repository-root>`
 
 so it can index `shell.qml` and provide completions/diagnostics.

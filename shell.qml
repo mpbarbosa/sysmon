@@ -83,28 +83,30 @@ PanelWindow {
     }
 
     function updateUsage() {
-        Qt.createQmlObject(`
-            import Quickshell.Io
-            Process {
-                id: proc
-                command: ["bash", "${root.monitorScriptPath}"]
-                running: true
-                stdout: StdioCollector {
-                    onStreamFinished: {
-                        try {
-                            var payload = JSON.parse(text.trim());
-                            root.cpuUsage = root.clampPercent(Number(payload.cpu));
-                            root.memoryUsage = root.clampPercent(Number(payload.memory));
-                        } catch (error) {
-                            root.cpuUsage = 0;
-                            root.memoryUsage = 0;
-                        }
+        if (metricsProcess.running) {
+            return;
+        }
 
-                        proc.destroy();
-                    }
+        metricsProcess.running = true;
+    }
+
+    Process {
+        id: metricsProcess
+        command: ["bash", root.monitorScriptPath]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var payload = JSON.parse(text.trim());
+                    root.cpuUsage = root.clampPercent(Number(payload.cpu));
+                    root.memoryUsage = root.clampPercent(Number(payload.memory));
+                } catch (error) {
+                    console.error("Failed to parse metrics:", error);
+                    root.cpuUsage = 0;
+                    root.memoryUsage = 0;
                 }
             }
-        `, root);
+        }
     }
 
     Timer {
