@@ -1,6 +1,8 @@
 # sysmon
 
 A shell desktop widget developed with **Quickshell** and **qmlls** to show CPU and memory consumption.
+**Version:** `v0.1.0-alpha`
+
 
 ## Files
 
