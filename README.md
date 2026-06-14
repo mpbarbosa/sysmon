@@ -1,8 +1,8 @@
 # sysmon
 
 A shell desktop widget developed with **Quickshell** and **qmlls** to show CPU and memory consumption.
-**Version:** `v0.1.0-alpha`
 
+**Version:** `v1.0.0-alpha`
 
 ## Files
 
@@ -17,6 +17,15 @@ A shell desktop widget developed with **Quickshell** and **qmlls** to show CPU a
    ```bash
    quickshell -p shell.qml
    ```
+
+The compositor is detected automatically at startup:
+
+| Compositor | Window type | Positioning |
+|---|---|---|
+| Sway, Hyprland (wlroots) | `PanelWindow` via layershell | Anchored to top-right edge |
+| GNOME, other | `FloatingWindow` fallback | Floating (position by window manager) |
+
+Detection checks `SWAYSOCK` and `HYPRLAND_INSTANCE_SIGNATURE` environment variables.
 
 ## qmlls setup
 

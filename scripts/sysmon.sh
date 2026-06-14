@@ -2,12 +2,12 @@
 set -euo pipefail
 
 if [[ ! -r /proc/stat || ! -r /proc/meminfo ]]; then
-  printf '{"cpu":0.00,"memory":0.00}\n'
+  printf '{"cpu":0.00,"memory":0.00,"disk":0.00}\n'
   exit 0
 fi
 
 if ! read -r cpu_line_prefix user nice system idle iowait irq softirq steal _ < /proc/stat; then
-  printf '{"cpu":0.00,"memory":0.00}\n'
+  printf '{"cpu":0.00,"memory":0.00,"disk":0.00}\n'
   exit 0
 fi
 prev_idle=$((idle + iowait))
@@ -17,7 +17,7 @@ prev_total=$((user + nice + system + idle + iowait + irq + softirq + steal))
 sleep 0.1
 
 if ! read -r cpu_line_prefix user nice system idle iowait irq softirq steal _ < /proc/stat; then
-  printf '{"cpu":0.00,"memory":0.00}\n'
+  printf '{"cpu":0.00,"memory":0.00,"disk":0.00}\n'
   exit 0
 fi
 idle_now=$((idle + iowait))
@@ -48,4 +48,7 @@ read -r mem_total mem_available < <(awk '
 ' /proc/meminfo)
 mem_used_percent=$(awk -v total="$mem_total" -v avail="$mem_available" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", ((total - avail) / total) * 100 } }')
 
-printf '{"cpu":%s,"memory":%s}\n' "$cpu_usage" "$mem_used_percent"
+read -r disk_total disk_used < <(df -P / | awk 'NR==2 { print $2, $3 }')
+disk_used_percent=$(awk -v total="$disk_total" -v used="$disk_used" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", used / total * 100 } }')
+
+printf '{"cpu":%s,"memory":%s,"disk":%s}\n' "$cpu_usage" "$mem_used_percent" "$disk_used_percent"
