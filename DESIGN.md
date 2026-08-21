@@ -111,7 +111,9 @@ The widget requests the current deletion estimate by running `cleanup_cache.sh -
 
 ### Window sizing
 
-`implicitWidth` is fixed at 260 px. `implicitHeight` is set explicitly on both window components (currently 224 px) to accommodate the layout: title (16 px) + three metric rows (label 13 px + progress bar ~20 px each, 6 px inner spacing) + deletion estimate text + "Clean Cache" button (28 px) + outer margins (12 px each side) + outer column spacing (10 px between items).
+`implicitWidth` is fixed at 260 px. `implicitHeight` is derived: `SysmonContent` sets its own `implicitHeight` to its column's implicit height plus the column margins counted twice, and both window components bind their `implicitHeight` to the content they instantiate. The window therefore tracks the layout automatically — currently 267 px for title + three metric rows + deletion estimate + "Clean Cache" button.
+
+This replaced a literal height set on each window component. The two values drifted apart when the disk row was added: the layout grew to 267 px while both windows stayed at 224 px, and because the window is a Wayland surface rather than a clipping `Item`, the 43 px of overflow — the entire "Clean Cache" button — was dropped with no visual indication that anything was missing. The widget looked complete. Binding the height to the content removes that failure mode, and removes the need to re-tune two separate constants whenever a row changes.
 
 ---
 
@@ -141,6 +143,10 @@ The script is interactive by design and cannot be made non-interactive without s
 
 ## Open Questions
 
-1. **Terminal emulator on wlroots.** The cleanup button is hardcoded to `gnome-terminal`. Users on Hyprland or Sway typically run `foot`, `alacritty`, or `kitty`. A `$TERMINAL` environment variable fallback or a configurable property in `shell.qml` would improve portability.
+1. **Terminal emulator dependency.** The cleanup button is hardcoded to `gnome-terminal`. This is a dependency on that binary being installed — not a compositor incompatibility: `gnome-terminal` is DBus-activated and allocates a real TTY normally under wlroots compositors (verified on Hyprland), so the cleanup runs correctly there whenever the package is present.
+
+   The gap is the missing-binary case. `cleanupProcess` declares no `onExited` or stderr handler, so if `gnome-terminal` is not installed the process fails to start and the widget shows nothing at all — the button appears to do nothing. Resolving this means two separate changes: selecting a terminal at runtime (honouring `$TERMINAL`, then falling back through a candidate list), and surfacing a launch failure in the widget instead of failing silently.
+
+   Terminal selection is not a pure substitution, which is why it is still open: the argument conventions differ (`gnome-terminal -- <cmd>`, `xterm -e <cmd>`, `kitty <cmd>`), so a candidate list has to carry each terminal's argv form rather than just its binary name.
 
 2. **sudo prompts in cleanup_cache.sh.** Section 28 (AWS CLI old versions) calls `sudo rm -rf`. When launched from the widget via `gnome-terminal`, the sudo prompt appears in the terminal window and works correctly. No special handling is needed, but this behavior is worth documenting for contributors who might consider running the script non-interactively.
