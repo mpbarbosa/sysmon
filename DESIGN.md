@@ -105,6 +105,16 @@ The layout is a `Column` containing a title, three label+`ProgressBar` pairs (CP
 
 The button therefore launches `gnome-terminal -- bash <path>`, which opens a new terminal window where the script runs interactively. `gnome-terminal` daemonizes immediately, so `cleanupProcess.running` returns to `false` within milliseconds of the click. A guard in `runCleanup()` prevents double-launch while the process object is briefly in the running state.
 
+### Quit affordance
+
+The widget is a layer-shell surface on wlroots compositors, so it has no title bar and no window close button; without an in-app affordance the only way to stop it is `Ctrl+C` or `quickshell kill`. A right-click `MouseArea` covering the whole widget calls `Qt.quit()`.
+
+Right-click was chosen over a visible close button because a close button would occupy a layout row and add clutter to a widget whose entire purpose is a compact readout. The trade-off is discoverability: a right-click target is invisible, which is why it is documented in the README.
+
+The `MouseArea` is declared *before* the content column so it sits beneath the cleanup button in z-order. It accepts only `Qt.RightButton`, and the cleanup button's own `MouseArea` accepts only the left button, so each receives the button it wants: left clicks and hover states reach the cleanup button, right clicks fall through to the quit handler even when the pointer is over that button. Reordering these two would break one or the other.
+
+`Qt.quit()` is the primitive. `Quickshell.quit()` does not exist in Quickshell 0.3.0 — it fails with `TypeError: Property 'quit' ... is not a function`.
+
 ### Cleanup deletion estimate
 
 The widget requests the current deletion estimate by running `cleanup_cache.sh --estimate-total-json` through a dedicated `Process`. The script emits one JSON object with a byte total and a formatted display string, which the QML layer parses into the estimate line shown above the cleanup button. A periodic timer refreshes that value so the widget stays reasonably current without embedding cleanup discovery logic in QML.
