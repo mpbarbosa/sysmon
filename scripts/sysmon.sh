@@ -48,7 +48,10 @@ read -r mem_total mem_available < <(awk '
 ' /proc/meminfo)
 mem_used_percent=$(awk -v total="$mem_total" -v avail="$mem_available" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", ((total - avail) / total) * 100 } }')
 
-read -r disk_total disk_used < <(df -P / | awk 'NR==2 { print $2, $3 }')
-disk_used_percent=$(awk -v total="$disk_total" -v used="$disk_used" 'BEGIN { if (total <= 0) { print "0.00" } else { printf "%.2f", used / total * 100 } }')
+# Percentage is used/(used+available), matching df's Use% column. The raw total
+# includes filesystem-reserved blocks that are unavailable to the user, so
+# dividing by it would under-report against what df shows.
+read -r disk_used disk_avail < <(df -P / | awk 'NR==2 { print $3, $4 }')
+disk_used_percent=$(awk -v used="$disk_used" -v avail="$disk_avail" 'BEGIN { capacity = used + avail; if (capacity <= 0) { print "0.00" } else { printf "%.2f", used / capacity * 100 } }')
 
 printf '{"cpu":%s,"memory":%s,"disk":%s}\n' "$cpu_usage" "$mem_used_percent" "$disk_used_percent"
