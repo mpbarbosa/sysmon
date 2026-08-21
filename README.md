@@ -44,6 +44,16 @@ The compositor is detected automatically at startup:
 
 Detection checks `SWAYSOCK` and `HYPRLAND_INSTANCE_SIGNATURE` environment variables.
 
+## Quit
+
+**Right-click anywhere on the widget.** On wlroots compositors the widget is a layer-shell surface with no title bar, so there is no window close button.
+
+`Ctrl+C` in the launching terminal also works. If the widget was detached with `-d`, stop it with:
+
+```bash
+quickshell kill -p shell.qml
+```
+
 ## qmlls setup
 
 Use your editor's QML language server (`qmlls`) with this repository opened at:

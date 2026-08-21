@@ -189,6 +189,16 @@ Scope {
         // column below needs no manual re-tuning. Margins count twice: top and bottom.
         implicitHeight: contentColumn.implicitHeight + contentColumn.anchors.margins * 2
 
+        // Right-click anywhere on the widget quits. Declared before the column so it
+        // sits beneath the cleanup button: the button keeps its left clicks and hover
+        // states, and right clicks fall through to here because the button's own
+        // MouseArea accepts only the left button.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.RightButton
+            onClicked: Qt.quit()
+        }
+
         Column {
             id: contentColumn
             anchors.fill: parent
