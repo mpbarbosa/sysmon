@@ -185,7 +185,12 @@ Scope {
         color: "#cc1e1e2e"
         border.color: "#665f7a"
 
+        // The window binds its height to this, so adding or removing a row in the
+        // column below needs no manual re-tuning. Margins count twice: top and bottom.
+        implicitHeight: contentColumn.implicitHeight + contentColumn.anchors.margins * 2
+
         Column {
+            id: contentColumn
             anchors.fill: parent
             anchors.margins: 12
             spacing: 10
@@ -296,10 +301,10 @@ Scope {
                 right: 12
             }
             implicitWidth: 260
-            implicitHeight: 224
+            implicitHeight: panelContent.implicitHeight
             color: "transparent"
 
-            SysmonContent {}
+            SysmonContent { id: panelContent }
         }
     }
 
@@ -308,10 +313,10 @@ Scope {
         id: floatingWindowComponent
         FloatingWindow {
             implicitWidth: 260
-            implicitHeight: 224
+            implicitHeight: floatingContent.implicitHeight
             color: "transparent"
 
-            SysmonContent {}
+            SysmonContent { id: floatingContent }
         }
     }
 }
