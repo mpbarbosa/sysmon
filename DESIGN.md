@@ -119,6 +119,10 @@ The `MouseArea` is declared *before* the content column so it sits beneath the c
 
 The widget requests the current deletion estimate by running `cleanup_cache.sh --estimate-total-json` through a dedicated `Process`. The script emits one JSON object with a byte total and a formatted display string, which the QML layer parses into the estimate line shown above the cleanup button. A periodic timer refreshes that value so the widget stays reasonably current without embedding cleanup discovery logic in QML.
 
+The total includes Docker's on-disk storage. Docker reports usage through `docker system df` rather than as a path, so it cannot join the `cleanup_candidates` array that `du` measures and is added to the path total separately in `emit_total_deletion_estimate_json`. Omitting it understated the estimate by the largest single item on a typical development machine: the widget reported 17G while the walkthrough went on to offer 98G. Adding it costs about 0.06 s, negligible against the du traversal.
+
+Note what this means for the displayed number: most of the Docker contribution sits behind one destructive prompt that removes *all* containers, images, and volumes, which many users will decline. The estimate is a preview of what the cleanup can remove, not of what a cautious run will actually remove. When Docker is absent or its daemon is unreachable the contribution is zero and the estimate falls back to the path total.
+
 ### Window sizing
 
 `implicitWidth` is fixed at 260 px. `implicitHeight` is derived: `SysmonContent` sets its own `implicitHeight` to its column's implicit height plus the column margins counted twice, and both window components bind their `implicitHeight` to the content they instantiate. The window therefore tracks the layout automatically — currently 267 px for title + three metric rows + deletion estimate + "Clean Cache" button.

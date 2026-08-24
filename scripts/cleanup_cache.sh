@@ -426,9 +426,17 @@ except Exception:
 }
 
 emit_total_deletion_estimate_json() {
-	local estimated_bytes
+	local estimated_bytes docker_bytes
 	gather_cleanup_estimate_candidates
 	estimated_bytes=$(estimate_deletion_bytes "${cleanup_candidates[@]}")
+
+	# Docker's storage is reported by `docker system df`, not by a path on disk, so
+	# it cannot join cleanup_candidates and has to be added to the du total here.
+	# The interactive walkthrough offers this same data for deletion, so omitting it
+	# understates the total by the largest single item on most machines.
+	docker_bytes=$(docker_storage_bytes)
+	(( estimated_bytes += docker_bytes )) || true
+
 	printf '{"bytes":%s,"formatted":"%s"}\n' "$estimated_bytes" "$(format_bytes "$estimated_bytes")"
 }
 
