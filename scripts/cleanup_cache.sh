@@ -136,6 +136,21 @@ print_deletion_estimate() {
 	echo -e "  Deletion estimate : ${BOLD}$(format_bytes "$bytes")${RESET}"
 }
 
+# Best-effort total of Docker's on-disk storage, in bytes. Sums the SIZE column
+# of `docker system df`; echoes 0 if Docker is unavailable or output is
+# unparsable. Docker prints decimal units (1.234GB / 100MB / 512kB), so strip
+# the trailing B and let numfmt parse the SI suffix.
+docker_storage_bytes() {
+	local total=0 size bytes
+	while IFS= read -r size; do
+		[[ -z "$size" || "$size" == "0B" ]] && continue
+		size="${size^^}"       # 512kB -> 512KB so numfmt accepts the suffix
+		bytes=$(numfmt --from=si "${size%B}" 2>/dev/null) || bytes=0
+		(( total += bytes )) || true
+	done < <(docker system df --format '{{.Size}}' 2>/dev/null)
+	echo "$total"
+}
+
 mark_cleanup_performed() {
 	any_cleanup_performed=true
 }
@@ -459,7 +474,7 @@ delete_folder() {
 	if confirm "  Delete?"; then
 		rm -rf "$path"
 		record_path_cleanup "$estimated_bytes"
-		echo -e "  ${GREEN}✓ Deleted (estimated reclaimed space: $estimated_size)${RESET}"
+		echo -e "  ${GREEN}✓ Deleted (deletion estimate: $estimated_size)${RESET}"
 	else
 		echo -e "  Skipped."
 	fi
@@ -579,7 +594,7 @@ else
 				rm -rf "${PUPPETEER_DIR:?}/$v"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -620,7 +635,7 @@ else
 				rm -rf "${PUPPETEER_HEADLESS_DIR:?}/$v"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -661,7 +676,7 @@ else
 				rm -rf "${SELENIUM_CD_DIR:?}/$v"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -702,7 +717,7 @@ else
 				rm -rf "${COPILOT_PKG_DIR:?}/$v"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -744,7 +759,7 @@ else
 				rm -rf "${COPILOT_SESSIONS_DIR:?}/$s"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted $old_count older session(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted $old_count older session(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -793,7 +808,7 @@ else
 				(( ++deleted ))
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Removed $deleted old extension version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Removed $deleted old extension version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -862,7 +877,7 @@ except Exception:
 				rm -rf "$d"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -886,7 +901,7 @@ except Exception:
 				rm -f "$f"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -941,7 +956,7 @@ except Exception:
 				rm -rf "$d"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -965,7 +980,7 @@ except Exception:
 				rm -f "$f"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -1079,7 +1094,7 @@ else
 				rm -rf "${NVM_NODE_DIR:?}/$v"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#stale[@]} stale Node version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#stale[@]} stale Node version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -1127,7 +1142,7 @@ else
 				rm -rf "$nm"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#stale_dirs[@]} node_modules folder(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#stale_dirs[@]} node_modules folder(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -1175,7 +1190,7 @@ else
 				sudo rm -rf "${AWS_CLI_DIR:?}/$v"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -1216,7 +1231,7 @@ else
 				ghcup rm ghc "$v" 2>&1 | grep -E "Info|Error" || true
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older GHC version(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older GHC version(s) (deletion estimate: $estimated_size)${RESET}"
 			echo -e "  ${YELLOW}  Note: clean up cabal store at ~/.cabal/store if no longer needed${RESET}"
 		else
 			echo -e "  Skipped."
@@ -1262,7 +1277,7 @@ else
 				rm -rf "$d"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#stale_hls_libs[@]} unused HLS lib build(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#stale_hls_libs[@]} unused HLS lib build(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
@@ -1303,7 +1318,45 @@ else
 				rm -rf "${MPBARBOSA_BACKUPS_DIR:?}/$b"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_backups[@]} older backup(s) (estimated reclaimed space: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#old_backups[@]} older backup(s) (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
+	fi
+fi
+
+# ── 30. Docker — all containers, images, and volumes ─────────────────────────
+
+print_header "Docker — all containers, images, and volumes"
+
+if ! command -v docker &>/dev/null; then
+	echo -e "${YELLOW}  docker command not found, skipping.${RESET}"
+elif ! docker info &>/dev/null; then
+	echo -e "${YELLOW}  Cannot reach the Docker daemon (not running, or needs sudo), skipping.${RESET}"
+else
+	container_count=$(docker ps -aq 2>/dev/null | grep -c . || true)
+	image_count=$(docker images -aq 2>/dev/null | grep -c . || true)
+	volume_count=$(docker volume ls -q 2>/dev/null | grep -c . || true)
+
+	if (( container_count == 0 && image_count == 0 && volume_count == 0 )); then
+		echo -e "  No Docker containers, images, or volumes present, nothing to delete."
+	else
+		docker_bytes=$(docker_storage_bytes)
+		docker_size=$(format_bytes "$docker_bytes")
+		echo -e "  ${RED}${BOLD}Removes ALL Docker data — not just unused items:${RESET}"
+		echo -e "    - Containers : ${BOLD}$container_count${RESET} (running ones are force-stopped)"
+		echo -e "    - Images     : ${BOLD}$image_count${RESET}"
+		echo -e "    - Volumes    : ${BOLD}$volume_count${RESET} (data inside them is lost permanently)"
+		echo -e "    - Build cache and unused networks"
+		print_deletion_estimate "$docker_bytes"
+
+		if confirm "  Remove ALL Docker containers, images, and volumes?"; then
+			ids=$(docker ps -aq 2>/dev/null);     [[ -n "$ids" ]] && docker rm -f $ids        >/dev/null 2>&1 || true
+			ids=$(docker images -aq 2>/dev/null);  [[ -n "$ids" ]] && docker rmi -f $ids       >/dev/null 2>&1 || true
+			ids=$(docker volume ls -q 2>/dev/null); [[ -n "$ids" ]] && docker volume rm -f $ids >/dev/null 2>&1 || true
+			docker system prune -a --volumes -f >/dev/null 2>&1 || true
+			record_path_cleanup "$docker_bytes"
+			echo -e "  ${GREEN}✓ Removed all Docker containers, images, and volumes (deletion estimate: $docker_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
