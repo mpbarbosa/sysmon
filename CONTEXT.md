@@ -39,7 +39,7 @@ The total storage occupied by the cleanup candidates for one prompt before anyth
 _Avoid_: freed space, reclaimed space, actual savings
 
 **Cleanup candidate**:
-A file system path selected by one cleanup step as eligible for removal. A cleanup candidate may be a file, directory, or symlink entry.
+A file system path selected by one cleanup step as eligible for removal. A cleanup candidate may be a file, directory, or symlink entry. Docker's on-disk storage is also a cleanup candidate despite not being a path: it is measured with `docker system df` rather than `du`.
 _Avoid_: cache target, deletion target, removable item
 
 **Stale project**:
