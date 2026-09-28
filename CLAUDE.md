@@ -42,7 +42,7 @@ Three files form a strict producer/consumer contract; changing one side means ch
 
 ### Conventions
 
-- **JSON contract:** `sysmon.sh` stdout is one JSON object with `cpu`/`memory`/`disk`. (Note: `.github/copilot-instructions.md` predates the disk metric and only mentions cpu/memory — `shell.qml` and DESIGN.md are authoritative.) Rename a field → update both sides.
+- **JSON contract:** `sysmon.sh` stdout is one JSON object with `cpu`/`memory`/`disk`. `shell.qml` and DESIGN.md are authoritative. Rename a field → update both sides.
 - **Never overlap polls.** `updateUsage()`/`updateCleanupEstimate()` no-op while their `Process.running` is already true. The 2s metrics timer and 60s estimate timer both rely on this.
 - **Clamp and parse defensively in QML.** `clampPercent()` forces values into 0–100; any `JSON.parse` failure resets metrics to 0 rather than leaving stale UI.
 - **Bash stays `/proc`-based and failure-tolerant.** Unreadable `/proc/stat` or `/proc/meminfo` emits zeroed metrics and exits 0 — never fail noisily.
