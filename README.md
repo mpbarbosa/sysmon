@@ -46,7 +46,7 @@ Detection checks `SWAYSOCK` and `HYPRLAND_INSTANCE_SIGNATURE` environment variab
 
 ## Quit
 
-**Right-click anywhere on the widget.** On wlroots compositors the widget is a layer-shell surface with no title bar, so there is no window close button.
+**Click the × in the top-right of the widget.** On wlroots compositors the widget is a layer-shell surface with no title bar, so the compositor provides no close button of its own.
 
 `Ctrl+C` in the launching terminal also works. If the widget was detached with `-d`, stop it with:
 
