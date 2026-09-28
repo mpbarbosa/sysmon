@@ -181,7 +181,7 @@ Scope {
 
     component SysmonContent: Rectangle {
         anchors.fill: parent
-        radius: 10
+        radius: 13
         // 95% opaque. At the previous 0xcc (80%) a dark window behind the widget
         // showed through as a near-black band, which made the title row -- and the
         // quit control in it -- unreadable. Enough translucency to sit on a desktop,
@@ -196,8 +196,8 @@ Scope {
         Column {
             id: contentColumn
             anchors.fill: parent
-            anchors.margins: 12
-            spacing: 10
+            anchors.margins: 16
+            spacing: 13
 
             // Title row: name on the left, quit control pinned right. The row is as
             // tall as the taller of the two so the close button never sets the height
@@ -211,7 +211,7 @@ Scope {
                     anchors.verticalCenter: parent.verticalCenter
                     text: "sysmon"
                     color: "#cdd6f4"
-                    font.pixelSize: 16
+                    font.pixelSize: 20
                     font.bold: true
                 }
 
@@ -219,9 +219,9 @@ Scope {
                     id: closeButton
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 18
-                    height: 18
-                    radius: 4
+                    width: 24
+                    height: 24
+                    radius: 5
                     color: closeArea.pressed
                         ? "#88f38ba8"
                         : (closeArea.containsMouse ? "#55f38ba8" : "transparent")
@@ -230,7 +230,7 @@ Scope {
                         anchors.centerIn: parent
                         text: "\u00d7"
                         color: closeArea.containsMouse ? "#f38ba8" : "#bac2de"
-                        font.pixelSize: 15
+                        font.pixelSize: 19
                     }
 
                     MouseArea {
@@ -246,12 +246,12 @@ Scope {
 
             Column {
                 width: parent.width
-                spacing: 6
+                spacing: 8
 
                 Text {
                     text: "CPU: " + root.cpuUsage.toFixed(1) + "%"
                     color: "#cdd6f4"
-                    font.pixelSize: 13
+                    font.pixelSize: 16
                 }
 
                 ProgressBar {
@@ -259,13 +259,14 @@ Scope {
                     to: 1
                     value: Math.max(0, Math.min(1, root.clampPercent(root.cpuUsage) / 100))
                     width: parent.width
+                    height: 26
                     Accessible.name: root.cpuAccessibleName
                 }
 
                 Text {
                     text: "Memory: " + root.memoryUsage.toFixed(1) + "%"
                     color: "#cdd6f4"
-                    font.pixelSize: 13
+                    font.pixelSize: 16
                 }
 
                 ProgressBar {
@@ -273,13 +274,14 @@ Scope {
                     to: 1
                     value: Math.max(0, Math.min(1, root.clampPercent(root.memoryUsage) / 100))
                     width: parent.width
+                    height: 26
                     Accessible.name: root.memoryAccessibleName
                 }
 
                 Text {
                     text: "Disk: " + root.diskUsage.toFixed(1) + "%"
                     color: "#cdd6f4"
-                    font.pixelSize: 13
+                    font.pixelSize: 16
                 }
 
                 ProgressBar {
@@ -287,6 +289,7 @@ Scope {
                     to: 1
                     value: Math.max(0, Math.min(1, root.clampPercent(root.diskUsage) / 100))
                     width: parent.width
+                    height: 26
                     Accessible.name: root.diskAccessibleName
                 }
             }
@@ -299,15 +302,15 @@ Scope {
                         ? "Deletion estimate: " + root.cleanupEstimateFormatted
                         : "Deletion estimate: unavailable")
                 color: "#bac2de"
-                font.pixelSize: 12
+                font.pixelSize: 15
                 wrapMode: Text.WordWrap
                 Accessible.name: root.cleanupEstimateAccessibleName
             }
 
             Rectangle {
                 width: parent.width
-                height: 28
-                radius: 6
+                height: 36
+                radius: 8
                 color: cleanupBtn.pressed ? "#6689b4fa" : (cleanupBtn.containsMouse ? "#4489b4fa" : "#2289b4fa")
                 border.color: "#4489b4fa"
 
@@ -315,7 +318,7 @@ Scope {
                     anchors.centerIn: parent
                     text: "Clean Cache"
                     color: "#cdd6f4"
-                    font.pixelSize: 12
+                    font.pixelSize: 15
                 }
 
                 MouseArea {
@@ -342,7 +345,7 @@ Scope {
                 top: 12
                 right: 12
             }
-            implicitWidth: 260
+            implicitWidth: 340
             implicitHeight: panelContent.implicitHeight
             color: "transparent"
 
@@ -354,7 +357,7 @@ Scope {
     Component {
         id: floatingWindowComponent
         FloatingWindow {
-            implicitWidth: 260
+            implicitWidth: 340
             implicitHeight: floatingContent.implicitHeight
             color: "transparent"
 
