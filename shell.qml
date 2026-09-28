@@ -182,7 +182,11 @@ Scope {
     component SysmonContent: Rectangle {
         anchors.fill: parent
         radius: 10
-        color: "#cc1e1e2e"
+        // 95% opaque. At the previous 0xcc (80%) a dark window behind the widget
+        // showed through as a near-black band, which made the title row -- and the
+        // quit control in it -- unreadable. Enough translucency to sit on a desktop,
+        // not enough to lose text over arbitrary content.
+        color: "#f21e1e2e"
         border.color: "#665f7a"
 
         // The window binds its height to this, so adding or removing a row in the
