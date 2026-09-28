@@ -107,11 +107,11 @@ The button therefore launches `gnome-terminal -- bash <path>`, which opens a new
 
 ### Quit affordance
 
-The widget is a layer-shell surface on wlroots compositors, so it has no title bar and no window close button; without an in-app affordance the only way to stop it is `Ctrl+C` or `quickshell kill`. A right-click `MouseArea` covering the whole widget calls `Qt.quit()`.
+The widget is a layer-shell surface on wlroots compositors, so it has no title bar and no window close button; without an in-app affordance the only way to stop it is `Ctrl+C` or `quickshell kill`. A `×` button sits at the right of the title row and calls `Qt.quit()`.
 
-Right-click was chosen over a visible close button because a close button would occupy a layout row and add clutter to a widget whose entire purpose is a compact readout. The trade-off is discoverability: a right-click target is invisible, which is why it is documented in the README.
+This replaced a right-click `MouseArea` covering the whole widget, which was chosen originally to keep the readout compact and free of chrome. It could never be made to work on the development machine. Measured there: `BTN_RIGHT` was emitted by the touchpad and reached libinput, but no Quickshell window ever received a right-button event — not the layer-shell widget, and not a plain `FloatingWindow` used as a control. Left clicks arrived at both. Whether Hyprland or Qt consumed the right button was not established, so the affordance was both unreachable and untestable on the target compositor. A visible control backed by a left click avoids the whole question.
 
-The `MouseArea` is declared *before* the content column so it sits beneath the cleanup button in z-order. It accepts only `Qt.RightButton`, and the cleanup button's own `MouseArea` accepts only the left button, so each receives the button it wants: left clicks and hover states reach the cleanup button, right clicks fall through to the quit handler even when the pointer is over that button. Reordering these two would break one or the other.
+The button lives inside an `Item` in the title row whose height is `Math.max(titleText.implicitHeight, closeButton.height)`, so the 18 px button cannot drive the row's height on its own and the layout is unchanged at 267 px. Unlike the right-click area it replaced, it carries `Accessible.role` and `Accessible.name`, matching the other controls in the widget — a whole-widget `MouseArea` could not, because announcing the entire readout as one button would have degraded the accessibility tree.
 
 `Qt.quit()` is the primitive. `Quickshell.quit()` does not exist in Quickshell 0.3.0 — it fails with `TypeError: Property 'quit' ... is not a function`.
 

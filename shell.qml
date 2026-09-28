@@ -189,27 +189,55 @@ Scope {
         // column below needs no manual re-tuning. Margins count twice: top and bottom.
         implicitHeight: contentColumn.implicitHeight + contentColumn.anchors.margins * 2
 
-        // Right-click anywhere on the widget quits. Declared before the column so it
-        // sits beneath the cleanup button: the button keeps its left clicks and hover
-        // states, and right clicks fall through to here because the button's own
-        // MouseArea accepts only the left button.
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.RightButton
-            onClicked: Qt.quit()
-        }
-
         Column {
             id: contentColumn
             anchors.fill: parent
             anchors.margins: 12
             spacing: 10
 
-            Text {
-                text: "sysmon"
-                color: "#cdd6f4"
-                font.pixelSize: 16
-                font.bold: true
+            // Title row: name on the left, quit control pinned right. The row is as
+            // tall as the taller of the two so the close button never sets the height
+            // on its own.
+            Item {
+                width: parent.width
+                height: Math.max(titleText.implicitHeight, closeButton.height)
+
+                Text {
+                    id: titleText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "sysmon"
+                    color: "#cdd6f4"
+                    font.pixelSize: 16
+                    font.bold: true
+                }
+
+                Rectangle {
+                    id: closeButton
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 18
+                    height: 18
+                    radius: 4
+                    color: closeArea.pressed
+                        ? "#88f38ba8"
+                        : (closeArea.containsMouse ? "#55f38ba8" : "transparent")
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "\u00d7"
+                        color: closeArea.containsMouse ? "#f38ba8" : "#bac2de"
+                        font.pixelSize: 15
+                    }
+
+                    MouseArea {
+                        id: closeArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: Qt.quit()
+                        Accessible.role: Accessible.Button
+                        Accessible.name: "Quit sysmon"
+                    }
+                }
             }
 
             Column {
