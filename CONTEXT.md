@@ -45,3 +45,11 @@ _Avoid_: cache target, deletion target, removable item
 **Stale project**:
 A project directory that has had no file modifications in more than 30 days, excluding its `node_modules` subtree. The cache cleanup targets `node_modules` in stale projects to reclaim disk space.
 _Avoid_: old project, inactive project, unused project
+
+**Recorded project directory**:
+The working directory a Claude Code session ran in, as stored in the `cwd` field of its own transcript files. It is the only authoritative source for that directory: the state folder's name encodes the same path with every `/` and `.` flattened to `-`, which is not reversible, so the name cannot be read back as a path.
+_Avoid_: project path, folder name, mangled path (acceptable when describing the encoding itself)
+
+**Orphaned project state**:
+A Claude Code state folder under `~/.claude/projects` whose recorded project directory no longer exists on disk. A folder with no transcript has no recorded project directory and is therefore never orphaned, and one holding `memory/` notes is excluded because those notes outlive the directory they were written in.
+_Avoid_: dead session, abandoned project, stale project state (stale project means something else here), orphan folder
