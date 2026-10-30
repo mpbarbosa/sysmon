@@ -213,6 +213,146 @@ collect_orphan_claude_projects() {
 	done
 }
 
+# Resolves an nvm alias value to the installed version it selects, printing
+# nothing when it selects none. Accepts "26", "26.13.0", "v26.13.0" and
+# "lts/<name>". lts aliases chain — lts/* holds "lts/lithium", which holds the
+# version — so indirection is followed a few levels before giving up. An alias
+# pointing at a version that is not installed resolves to nothing.
+resolve_node_alias() {
+	local want="$1"
+	shift
+	local alias_dir="$HOME/.nvm/alias"
+	local v best="" hops=0
+
+	# A dangling alias is normal. The -f guard matters as well as the `|| true`:
+	# `< missing` is reported by the shell itself, so tr's own 2>/dev/null does
+	# not suppress it and the message leaks into the widget's output.
+	while [[ "$want" == lts/* ]] && (( hops < 5 )); do
+		if [[ -f "$alias_dir/$want" ]]; then
+			want=$(tr -d '[:space:]' < "$alias_dir/$want" 2>/dev/null || true)
+		else
+			want=""
+		fi
+		hops=$(( hops + 1 ))
+	done
+
+	[[ -n "$want" ]] || return 0
+	[[ "$want" == v* ]] || want="v$want"
+
+	for v in "$@"; do
+		if [[ "$v" == "$want" ]]; then
+			printf '%s\n' "$v"
+			return 0
+		fi
+		# A partial alias ("v26") selects the newest installed release in that
+		# series, which is what `nvm use 26` would pick.
+		if [[ "$v" == "$want".* ]]; then
+			if [[ -z "$best" ]] ||
+				[[ "$(printf '%s\n%s\n' "${best#v}" "${v#v}" | sort -V | tail -1)" == "${v#v}" ]]; then
+				best="$v"
+			fi
+		fi
+	done
+
+	[[ -n "$best" ]] && printf '%s\n' "$best"
+	return 0
+}
+
+# Prints every vX.Y.Z directory under ~/.nvm/versions/node, normalised to a
+# leading "v", one per line.
+#
+# Anything else in there — a partial download, a leftover `system` folder — is
+# skipped rather than parsed. Reading a major number out of such a name with
+# `grep -oP` matched nothing, which under set -e aborted the entire cleanup run
+# at this section and silently skipped every section after it.
+collect_node_versions() {
+	local nvm_node_dir="$HOME/.nvm/versions/node"
+	local entry
+
+	[[ -d "$nvm_node_dir" ]] || return 0
+
+	# sort -V so callers list versions in release order: a plain glob puts
+	# v26.10.0 before v26.2.0, which reads as a mistake in the deletion list.
+	for entry in "$nvm_node_dir"/*/; do
+		entry=${entry%/}
+		entry=${entry##*/}
+		[[ "$entry" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+		[[ "$entry" == v* ]] || entry="v$entry"
+		printf '%s\n' "$entry"
+	done | sort -V
+}
+
+# Prints the installed Node versions that are safe to delete, one per line.
+#
+# Kept, and so never printed:
+#   - the newest release of each even (LTS-eligible) major series, so every
+#     series a project might pin stays usable, plus the newest version
+#     installed overall as a floor;
+#   - whatever `node` currently resolves to, when that binary lives under the
+#     nvm directory. This is not always the newest or the default — a shell on
+#     v26.12.1 while default is v26.13.0 is normal — and deleting it would
+#     break the running environment;
+#   - the `default` alias target and every `lts/*` alias target, which is what
+#     nvm itself would select.
+#
+# The rule this replaces kept every even-major version outright. Node only
+# promotes even majors to LTS, so on a typical install that kept everything and
+# the section never freed anything: 20 versions installed, 0 reported stale.
+#
+# Section 23 and gather_cleanup_estimate_candidates both call this, so the
+# deletion estimate and the deletion can never disagree about what is stale.
+collect_stale_node_versions() {
+	local nvm_node_dir="$HOME/.nvm/versions/node"
+	local alias_dir="$HOME/.nvm/alias"
+	local entry v resolved active keep_list default_ver
+	local -a installed=()
+
+	mapfile -t installed < <(collect_node_versions)
+	[[ "${#installed[@]}" -gt 0 ]] || return 0
+
+	# Newest release of each even major series. sort -V puts the highest last,
+	# so the last line awk sees for a given major wins. Only even majors are
+	# protected as a series: Node never promotes an odd major to LTS, so an odd
+	# series that no alias and no running shell points at is fair game.
+	keep_list=$(printf '%s\n' "${installed[@]}" | sed 's/^v//' | sort -V |
+		awk -F. '$1 % 2 == 0 { newest[$1] = $0 } END { for (m in newest) print "v" newest[m] }')
+
+	# Floor: the newest version overall always survives, so an install whose
+	# only Node is an odd major is never left without one.
+	keep_list+=$'\n'"v$(printf '%s\n' "${installed[@]}" | sed 's/^v//' | sort -V | tail -1)"
+
+	# The version in use, taken from nvm's own NVM_BIN when it is exported and
+	# from PATH otherwise, and only trusted when it really comes from nvm.
+	active="${NVM_BIN:-$(command -v node 2>/dev/null || true)}"
+	if [[ -n "$active" && "$active" == "$nvm_node_dir"/* ]]; then
+		active=${active#"$nvm_node_dir"/}
+		active=${active%%/*}
+		keep_list+=$'\n'"$active"
+	fi
+
+	# `|| true` on every alias read: a missing alias/default file is normal for
+	# an install where `nvm alias default` was never run, and reading it under
+	# set -e used to abort the whole cleanup run here.
+	default_ver=""
+	[[ -f "$alias_dir/default" ]] &&
+		default_ver=$(tr -d '[:space:]' < "$alias_dir/default" 2>/dev/null || true)
+	resolved=$(resolve_node_alias "$default_ver" "${installed[@]}")
+	[[ -n "$resolved" ]] && keep_list+=$'\n'"$resolved"
+
+	if [[ -d "$alias_dir/lts" ]]; then
+		for entry in "$alias_dir"/lts/*; do
+			[[ -f "$entry" ]] || continue
+			resolved=$(resolve_node_alias \
+				"$(tr -d '[:space:]' < "$entry" 2>/dev/null || true)" "${installed[@]}")
+			[[ -n "$resolved" ]] && keep_list+=$'\n'"$resolved"
+		done
+	fi
+
+	for v in "${installed[@]}"; do
+		grep -qxF -- "$v" <<<"$keep_list" || printf '%s\n' "$v"
+	done
+}
+
 gather_cleanup_estimate_candidates() {
 	local PUPPETEER_DIR="$HOME/.cache/puppeteer/chrome"
 	local PUPPETEER_HEADLESS_DIR="$HOME/.cache/puppeteer/chrome-headless-shell"
@@ -224,7 +364,6 @@ gather_cleanup_estimate_candidates() {
 	local WS_STORAGE="$HOME/.config/Code/User/workspaceStorage"
 	local WS_STORAGE_INSIDERS="$HOME/.config/Code - Insiders/User/workspaceStorage"
 	local NVM_NODE_DIR="$HOME/.nvm/versions/node"
-	local NVM_ALIAS_DIR="$HOME/.nvm/alias"
 	local GITHUB_DIR="$HOME/Documents/GitHub"
 	local STALE_DAYS=30
 	local AWS_CLI_DIR="/usr/local/aws-cli/v2"
@@ -239,9 +378,6 @@ gather_cleanup_estimate_candidates() {
 	local proj
 	local last
 	local age
-	local full_v
-	local keep
-	local major
 	local hls_ver
 	local lib_dir
 	local ghc_ver
@@ -254,8 +390,6 @@ gather_cleanup_estimate_candidates() {
 	local -a old_ext_versions=()
 	local -a backups=()
 	local -a stale=()
-	local -a all_versions=()
-	local -a lts_vers=()
 	local -a ghc_versions=()
 
 	cleanup_candidates=(
@@ -379,37 +513,10 @@ except Exception:
 		done < <(find "$WS_STORAGE_INSIDERS" -name "state.vscdb.backup" -print0 2>/dev/null)
 	fi
 
-	if [[ -d "$NVM_NODE_DIR" ]]; then
-		default_ver=$(cat "$NVM_ALIAS_DIR/default" 2>/dev/null)
-		[[ "$default_ver" != v* ]] && default_ver="v$default_ver"
-
-		lts_vers=()
-		if [[ -d "$NVM_ALIAS_DIR/lts" ]]; then
-			while IFS= read -r alias_target; do
-				ver=$(cat "$NVM_ALIAS_DIR/lts/$alias_target" 2>/dev/null | tr -d '[:space:]')
-				[[ -n "$ver" ]] && lts_vers+=("$ver")
-			done < <(ls "$NVM_ALIAS_DIR/lts/" 2>/dev/null)
-		fi
-
-		mapfile -t all_versions < <(ls -1t "$NVM_NODE_DIR")
-		stale=()
-		for v in "${all_versions[@]}"; do
-			full_v="$v"
-			[[ "$full_v" != v* ]] && full_v="v$full_v"
-			keep=false
-			[[ "$full_v" == "$default_ver" ]] && keep=true
-			for lts in "${lts_vers[@]}"; do
-				[[ "$full_v" == "$lts" ]] && keep=true
-			done
-			major=$(echo "$full_v" | grep -oP '(?<=v)\d+')
-			(( major % 2 == 0 )) && keep=true
-			[[ "$keep" == false ]] && stale+=("$v")
-		done
-
-		for v in "${stale[@]}"; do
-			append_cleanup_candidates "$NVM_NODE_DIR/$v"
-		done
-	fi
+	mapfile -t stale < <(collect_stale_node_versions)
+	for v in ${stale[@]+"${stale[@]}"}; do
+		append_cleanup_candidates "$NVM_NODE_DIR/$v"
+	done
 
 	if [[ -d "$GITHUB_DIR" ]]; then
 		while IFS= read -r nm; do
@@ -1093,41 +1200,28 @@ fi
 print_header "NVM — old Node.js versions"
 
 NVM_NODE_DIR="$HOME/.nvm/versions/node"
-NVM_ALIAS_DIR="$HOME/.nvm/alias"
 
 if [[ ! -d "$NVM_NODE_DIR" ]]; then
 	echo -e "${YELLOW}  Not found, skipping: $NVM_NODE_DIR${RESET}"
 else
-	default_ver=$(cat "$NVM_ALIAS_DIR/default" 2>/dev/null)
-	[[ "$default_ver" != v* ]] && default_ver="v$default_ver"
+	mapfile -t all_versions < <(collect_node_versions)
+	mapfile -t stale < <(collect_stale_node_versions)
 
-	# Collect installed LTS versions (even-major or explicitly aliased lts/*)
-	lts_vers=()
-	if [[ -d "$NVM_ALIAS_DIR/lts" ]]; then
-		while IFS= read -r alias_target; do
-			ver=$(cat "$NVM_ALIAS_DIR/lts/$alias_target" 2>/dev/null | tr -d '[:space:]')
-			[[ -n "$ver" ]] && lts_vers+=("$ver")
-		done < <(ls "$NVM_ALIAS_DIR/lts/" 2>/dev/null)
-	fi
+	# -x and -F matter here. With nothing stale the pattern list is empty, and a
+	# bare `grep -v ""` matched every line as a substring and so reported that
+	# nothing was kept, on an install where in fact everything was.
+	mapfile -t kept < <(
+		printf '%s\n' ${all_versions[@]+"${all_versions[@]}"} |
+			grep -vxF -f <(printf '%s\n' ${stale[@]+"${stale[@]}"}) || true
+	)
 
-	mapfile -t all_versions < <(ls -1t "$NVM_NODE_DIR")
-	stale=()
-	for v in "${all_versions[@]}"; do
-		full_v="$v"
-		[[ "$full_v" != v* ]] && full_v="v$full_v"
-		keep=false
-		[[ "$full_v" == "$default_ver" ]] && keep=true
-		for lts in "${lts_vers[@]}"; do
-			[[ "$full_v" == "$lts" ]] && keep=true
-		done
-		# Also keep any even-major LTS series present (v20, v22, v24...)
-		major=$(echo "$full_v" | grep -oP '(?<=v)\d+')
-		(( major % 2 == 0 )) && keep=true
-		[[ "$keep" == false ]] && stale+=("$v")
-	done
-
-	echo -e "  Default : ${BOLD}$default_ver${RESET}"
-	echo -e "  Keeping LTS/even-major versions: $(printf '%s ' "${all_versions[@]}" | tr ' ' '\n' | grep -v "$(printf '%s\n' "${stale[@]}")" | tr '\n' ' ' || true)"
+	default_ver=""
+	[[ -f "$HOME/.nvm/alias/default" ]] &&
+		default_ver=$(tr -d '[:space:]' < "$HOME/.nvm/alias/default" 2>/dev/null || true)
+	[[ -n "$default_ver" ]] && echo -e "  Default : ${BOLD}$default_ver${RESET}"
+	echo -e "  Keeping (${#kept[@]}) : ${BOLD}${kept[*]-}${RESET}"
+	echo -e "  Note    : keeps the newest release of each even (LTS) major series,"
+	echo -e "            the version in use, and every default/lts alias target."
 
 	if [[ "${#stale[@]}" -eq 0 ]]; then
 		echo -e "  No stale Node versions to delete."
