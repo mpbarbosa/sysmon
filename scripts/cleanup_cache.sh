@@ -1511,8 +1511,9 @@ else
 	fi
 fi
 
-# ── 31. Docker — all containers, images, and volumes ─────────────────────────
-print_header "Temporary files in Github projects"
+# ── 31. Temporary files in GitHub projects ───────────────────────────────────
+
+print_header "Temporary files in GitHub projects"
 
 if [[ ! -d "$GITHUB_DIR" ]]; then
 	echo -e "${YELLOW}  Not found, skipping: $GITHUB_DIR${RESET}"
