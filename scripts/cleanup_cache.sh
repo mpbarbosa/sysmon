@@ -2,6 +2,9 @@
 # cleanup_cache.sh — Interactive disk space cleanup script
 # Prompts for confirmation before deleting each cache/folder.
 
+# The `-e` option causes the script to exit immediately if any command exits with a non-zero status.
+# The `-u` option treats unset variables as an error and exits immediately.
+# The `-o pipefail` option causes a pipeline to return the exit status of the last command in the pipe that returned a non-zero exit code.
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -172,6 +175,44 @@ append_cleanup_candidates() {
 	done
 }
 
+# Claude Code keeps one state folder per project under ~/.claude/projects, named
+# after the project's working directory with every '/' and '.' flattened to '-'.
+# That mangling is not reversible — both characters collapse to the same '-' — so
+# the folder name cannot be read back as a path. The recorded project directory,
+# the "cwd" field inside the folder's own *.jsonl transcripts, is the only
+# authoritative source. State is orphaned when that directory no longer exists.
+#
+# Two guards keep this away from data worth having:
+#   - no transcript: nothing records a directory, so orphanhood is undecidable.
+#     Such folders also hold memory/ notes with no session attached.
+#   - memory/ holds files: those notes outlive the directory they were taken in.
+#
+# Liveness is deliberately not consulted. A running session's working directory
+# exists by definition, so the -e check already excludes it.
+collect_orphan_claude_projects() {
+	local projects_dir="$HOME/.claude/projects"
+	local dir newest cwd
+
+	[[ -d "$projects_dir" ]] || return 0
+
+	for dir in "$projects_dir"/*/; do
+		[[ -d "$dir" ]] || continue
+
+		# `|| true` on every pipeline here: set -o pipefail turns an empty grep,
+		# a glob that matches nothing, or head's SIGPIPE into a fatal error.
+		newest=$(ls -1t "$dir"*.jsonl 2>/dev/null | head -1 || true)
+		[[ -n "$newest" ]] || continue
+
+		cwd=$(grep -o -m1 '"cwd":"[^"]*"' "$newest" 2>/dev/null | head -1 | cut -d'"' -f4 || true)
+		[[ -n "$cwd" ]] || continue
+		[[ -e "$cwd" ]] && continue
+
+		[[ -n "$(find "$dir/memory" -type f -print -quit 2>/dev/null)" ]] && continue
+
+		printf '%s\n' "${dir%/}"
+	done
+}
+
 gather_cleanup_estimate_candidates() {
 	local PUPPETEER_DIR="$HOME/.cache/puppeteer/chrome"
 	local PUPPETEER_HEADLESS_DIR="$HOME/.cache/puppeteer/chrome-headless-shell"
@@ -193,6 +234,7 @@ gather_cleanup_estimate_candidates() {
 	local ws
 	local d
 	local f
+	local orphan
 	local pkg
 	local proj
 	local last
@@ -414,6 +456,10 @@ except Exception:
 			done
 		done
 	fi
+
+	while IFS= read -r orphan; do
+		[[ -n "$orphan" ]] && append_cleanup_candidates "$orphan"
+	done < <(collect_orphan_claude_projects)
 
 	if [[ -d "$MPBARBOSA_BACKUPS_DIR" ]]; then
 		mapfile -t backups < <(ls -1t "$MPBARBOSA_BACKUPS_DIR")
@@ -1368,6 +1414,71 @@ else
 		else
 			echo -e "  Skipped."
 		fi
+	fi
+fi
+
+# ── 31. Docker — all containers, images, and volumes ─────────────────────────
+print_header "Temporary files in Github projects"
+
+if [[ ! -d "$GITHUB_DIR" ]]; then
+	echo -e "${YELLOW}  Not found, skipping: $GITHUB_DIR${RESET}"
+else
+	mapfile -t temp_dirs < <(
+		find "$GITHUB_DIR" -type d \( -name "deps" -o -name "incremental" \) 2>/dev/null
+	)
+
+	if [[ "${#temp_dirs[@]}" -eq 0 ]]; then
+		echo -e "  No temporary directories found."
+	else
+		estimated_bytes=$(estimate_deletion_bytes "${temp_dirs[@]}")
+		estimated_size=$(format_bytes "$estimated_bytes")
+		echo -e "  Found ${#temp_dirs[@]} temporary directories:"
+		for d in "${temp_dirs[@]}"; do
+			echo -e "    - $d  ($(path_size "$d"))"
+		done
+		print_deletion_estimate "$estimated_bytes"
+
+		if confirm "  Delete all temporary directories?"; then
+			for d in "${temp_dirs[@]}"; do
+				rm -rf "$d"
+			done
+			record_path_cleanup "$estimated_bytes"
+			echo -e "  ${GREEN}✓ Deleted ${#temp_dirs[@]} temporary directory(s) (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
+	fi
+fi
+
+# ── 32. Claude Code — orphaned project state ─────────────────────────────────
+
+print_header "Claude Code — orphaned project state"
+
+mapfile -t orphan_projects < <(collect_orphan_claude_projects)
+
+if [[ "${#orphan_projects[@]}" -eq 0 ]]; then
+	echo -e "  No orphaned project state found."
+else
+	echo -e "  Orphaned project state (${#orphan_projects[@]}) — the recorded project directory is gone:"
+	for d in "${orphan_projects[@]}"; do
+		echo -e "    - $(basename "$d")  ($(path_size "$d"))"
+	done
+	estimated_bytes=$(estimate_deletion_bytes "${orphan_projects[@]}")
+	estimated_size=$(format_bytes "$estimated_bytes")
+	print_deletion_estimate "$estimated_bytes"
+	echo -e "  Note : removes transcripts and session state permanently. Folders holding"
+	echo -e "         memory/ notes, and folders with no transcript, are never listed here."
+
+	if confirm "  Delete orphaned project state?"; then
+		for d in "${orphan_projects[@]}"; do
+			# `--` matters: these folder names begin with '-', so a bare argument
+			# would be parsed as options by rm.
+			rm -rf -- "$d"
+		done
+		record_path_cleanup "$estimated_bytes"
+		echo -e "  ${GREEN}✓ Deleted orphaned project state for ${#orphan_projects[@]} project(s) (deletion estimate: $estimated_size)${RESET}"
+	else
+		echo -e "  Skipped."
 	fi
 fi
 
