@@ -237,6 +237,71 @@ collect_stale_cursor_snapshot_temp_packs() {
 		-type f -mtime +1 -print 2>/dev/null || true
 }
 
+# Version directories under ~/.local/share/cursor-agent/versions that a live
+# process is executing from. A cursor-agent started before an update keeps
+# running out of its old directory, so the launcher symlink alone does not
+# account for every version still in use.
+cursor_agent_versions_in_use() {
+	local versions_dir="$1"
+	local proc exe rest
+
+	for proc in /proc/[0-9]*; do
+		exe=$(readlink "$proc/exe" 2>/dev/null) || continue
+		case "$exe" in
+			"$versions_dir"/*)
+				rest=${exe#"$versions_dir"/}
+				printf '%s\n' "${rest%%/*}"
+				;;
+		esac
+	done
+}
+
+# cursor-agent never removes the version it replaces: 13 of them had piled up
+# here, ~557M each, back to June. Unlike the other "keep the newest" sections,
+# which pick by name or mtime, the live version is knowable exactly --
+# ~/.local/bin/cursor-agent is a symlink into the directory in use -- so that
+# symlink decides what to keep, and any version a running process is executing
+# from is kept as well.
+#
+# When the symlink is missing or dangling, nothing is listed. Guessing by name
+# would risk deleting the very version in use, and that is the one outcome
+# worth refusing: cursor-agent on PATH from somewhere else is ordinary, while a
+# deleted live version leaves no binary to run.
+collect_stale_cursor_agent_versions() {
+	local versions_dir="$HOME/.local/share/cursor-agent/versions"
+	local launcher="$HOME/.local/bin/cursor-agent"
+	local live="" target dir name
+	local -a in_use=()
+
+	[[ -d "$versions_dir" ]] || return 0
+
+	# -e, not -f: a dangling symlink resolves fine under -f, and a live version
+	# that is no longer on disk must not be treated as known.
+	target=$(readlink -e "$launcher" 2>/dev/null) || return 0
+	case "$target" in
+		"$versions_dir"/*)
+			live=${target#"$versions_dir"/}
+			live=${live%%/*}
+			;;
+		*) return 0 ;;
+	esac
+	[[ -n "$live" ]] || return 0
+
+	mapfile -t in_use < <(cursor_agent_versions_in_use "$versions_dir")
+
+	for dir in "$versions_dir"/*/; do
+		[[ -d "$dir" ]] || continue
+		name=$(basename "$dir")
+		[[ "$name" == "$live" ]] && continue
+		# `|| true`: grep finding nothing is not an error here.
+		if [[ "${#in_use[@]}" -gt 0 ]] \
+			&& printf '%s\n' "${in_use[@]}" | grep -qxF "$name"; then
+			continue
+		fi
+		printf '%s\n' "${dir%/}"
+	done
+}
+
 # True while an Android emulator process is alive.
 #
 # The executable behind /proc/<pid>/exe is the only reliable signal here. The
@@ -455,6 +520,7 @@ gather_cleanup_estimate_candidates() {
 	local age
 	local temp_pack
 	local avd_snapshots
+	local agent_version
 	local hls_ver
 	local lib_dir
 	local ghc_ver
@@ -658,6 +724,10 @@ except Exception:
 	while IFS= read -r avd_snapshots; do
 		[[ -n "$avd_snapshots" ]] && append_cleanup_candidates "$avd_snapshots"
 	done < <(collect_avd_quickboot_snapshots)
+
+	while IFS= read -r agent_version; do
+		[[ -n "$agent_version" ]] && append_cleanup_candidates "$agent_version"
+	done < <(collect_stale_cursor_agent_versions)
 
 	if [[ -d "$MPBARBOSA_BACKUPS_DIR" ]]; then
 		mapfile -t backups < <(ls -1t "$MPBARBOSA_BACKUPS_DIR")
@@ -1735,6 +1805,45 @@ delete_folder \
 	"Android SDK repository cache" \
 	"$HOME/.android/cache" \
 	"Downloaded sdkbin-*.xml package manifests for the SDK Manager. Re-fetched on next SDK check."
+
+# ── 41. cursor-agent — old versions ─────────────────────────────────────────
+
+print_header "cursor-agent — old versions"
+
+CURSOR_AGENT_DIR="$HOME/.local/share/cursor-agent/versions"
+
+if [[ ! -d "$CURSOR_AGENT_DIR" ]]; then
+	echo -e "${YELLOW}  Not found, skipping: $CURSOR_AGENT_DIR${RESET}"
+elif ! readlink -e "$HOME/.local/bin/cursor-agent" >/dev/null 2>&1; then
+	echo -e "${YELLOW}  Cannot tell which version is in use (no launcher symlink), skipping.${RESET}"
+else
+	mapfile -t agent_versions < <(collect_stale_cursor_agent_versions)
+
+	if [[ "${#agent_versions[@]}" -eq 0 ]]; then
+		echo -e "  Only the version in use is present, nothing to delete."
+	else
+		echo -e "  Keeping : $(basename "$(dirname "$(readlink -e "$HOME/.local/bin/cursor-agent")")") (launcher symlink target)"
+		echo -e "  To delete (${#agent_versions[@]} old version(s)):"
+		for d in "${agent_versions[@]}"; do
+			echo -e "    - $(basename "$d")  ($(path_size "$d"))"
+		done
+		estimated_bytes=$(estimate_deletion_bytes "${agent_versions[@]}")
+		estimated_size=$(format_bytes "$estimated_bytes")
+		print_deletion_estimate "$estimated_bytes"
+		echo -e "  Note : any version a running cursor-agent is executing from is kept"
+		echo -e "         too, so an agent started before an update is never cut off."
+
+		if confirm "  Delete old cursor-agent versions?"; then
+			for d in "${agent_versions[@]}"; do
+				rm -rf "$d"
+			done
+			record_path_cleanup "$estimated_bytes"
+			echo -e "  ${GREEN}✓ Removed ${#agent_versions[@]} old cursor-agent version(s) (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
+	fi
+fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 
