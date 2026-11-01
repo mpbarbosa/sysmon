@@ -400,6 +400,7 @@ gather_cleanup_estimate_candidates() {
 		"$HOME/.local/share/nvim/lazy"
 		"$HOME/.cache/pip/http-v2"
 		"$HOME/.npm/_cacache"
+		"$HOME/.local/share/zed/node/cache"
 		"$HOME/.cache/google-chrome/Default/Cache"
 		"$HOME/snap/spotify/common/.cache/spotify"
 		"$HOME/snap/spotify/common/.cache/mesa_shader_cache_db"
@@ -1576,6 +1577,13 @@ else
 		echo -e "  Skipped."
 	fi
 fi
+
+# ── 33. Zed — npm cache for its bundled Node ─────────────────────────────────
+
+delete_folder \
+	"Zed npm cache" \
+	"$HOME/.local/share/zed/node/cache" \
+	"npm cache_dir for the Node that Zed runs language servers and agent servers with: _cacache tarballs plus one _npx install tree per package version. Re-downloaded on demand. Zed's own extensions, languages, and db folders are untouched."
 
 # ── summary ───────────────────────────────────────────────────────────────────
 
