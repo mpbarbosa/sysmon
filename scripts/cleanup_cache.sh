@@ -237,6 +237,57 @@ collect_stale_cursor_snapshot_temp_packs() {
 		-type f -mtime +1 -print 2>/dev/null || true
 }
 
+# True while an Android emulator process is alive.
+#
+# The executable behind /proc/<pid>/exe is the only reliable signal here. The
+# obvious `pgrep -f emulator` is not: a command line that merely mentions the
+# word matches, and on this machine several do -- Claude Code's own argv lists
+# an "emulator" MCP server -- so a command-line match reported a running
+# emulator when none existed. A basename match on the real binary cannot be
+# fooled that way.
+#
+# readlink fails for processes owned by another user; those are not ours and
+# cannot be holding our AVD open, so skipping them is correct.
+android_emulator_running() {
+	local proc exe
+
+	for proc in /proc/[0-9]*; do
+		exe=$(readlink "$proc/exe" 2>/dev/null) || continue
+		case "${exe##*/}" in
+			qemu-system-*|emulator|emulator64-*) return 0 ;;
+		esac
+	done
+
+	return 1
+}
+
+# Quick Boot snapshots: the saved RAM and disk state an AVD resumes from
+# instead of cold booting. Deleting one costs a single slow boot and nothing
+# else, which is the only part of ~/.android that is regenerable.
+#
+# Everything around it is state, so the path is pinned to <name>.avd/snapshots
+# and nothing else under ~/.android is ever listed. userdata-qemu.img.qcow2 is
+# the device's own data, and debug.keystore and adbkey are worse than data:
+# losing the keystore makes every already-installed debug build refuse to
+# update, and losing adbkey re-prompts every physical device for USB debugging.
+#
+# Nothing is listed while an emulator runs: snapshots are exactly what a live
+# emulator writes on exit.
+collect_avd_quickboot_snapshots() {
+	local avd_dir="$HOME/.android/avd"
+	local snapshots
+
+	[[ -d "$avd_dir" ]] || return 0
+	android_emulator_running && return 0
+
+	for snapshots in "$avd_dir"/*.avd/snapshots; do
+		[[ -d "$snapshots" ]] || continue
+		# An emulator that has never saved state leaves the directory empty.
+		[[ -n "$(find "$snapshots" -mindepth 1 -print -quit 2>/dev/null)" ]] || continue
+		printf '%s\n' "$snapshots"
+	done
+}
+
 # Resolves an nvm alias value to the installed version it selects, printing
 # nothing when it selects none. Accepts "26", "26.13.0", "v26.13.0" and
 # "lts/<name>". lts aliases chain — lts/* holds "lts/lithium", which holds the
@@ -403,6 +454,7 @@ gather_cleanup_estimate_candidates() {
 	local last
 	local age
 	local temp_pack
+	local avd_snapshots
 	local hls_ver
 	local lib_dir
 	local ghc_ver
@@ -439,6 +491,7 @@ gather_cleanup_estimate_candidates() {
 		"$HOME/.config/Cursor/CachedData"
 		"$HOME/.config/google-chrome/Default/Service Worker/CacheStorage"
 		"$HOME/.gradle/caches"
+		"$HOME/.android/cache"
 	)
 
 	if [[ -d "$PUPPETEER_DIR" ]]; then
@@ -601,6 +654,10 @@ except Exception:
 	while IFS= read -r temp_pack; do
 		[[ -n "$temp_pack" ]] && append_cleanup_candidates "$temp_pack"
 	done < <(collect_stale_cursor_snapshot_temp_packs)
+
+	while IFS= read -r avd_snapshots; do
+		[[ -n "$avd_snapshots" ]] && append_cleanup_candidates "$avd_snapshots"
+	done < <(collect_avd_quickboot_snapshots)
 
 	if [[ -d "$MPBARBOSA_BACKUPS_DIR" ]]; then
 		mapfile -t backups < <(ls -1t "$MPBARBOSA_BACKUPS_DIR")
@@ -1631,6 +1688,53 @@ else
 		echo -e "  Skipped."
 	fi
 fi
+
+# ── 39. Android emulator — Quick Boot snapshots ─────────────────────────────
+
+print_header "Android emulator — Quick Boot snapshots"
+
+AVD_DIR="$HOME/.android/avd"
+
+if [[ ! -d "$AVD_DIR" ]]; then
+	echo -e "${YELLOW}  Not found, skipping: $AVD_DIR${RESET}"
+elif android_emulator_running; then
+	echo -e "${YELLOW}  An emulator is running — leaving snapshots alone.${RESET}"
+else
+	mapfile -t avd_snapshot_dirs < <(collect_avd_quickboot_snapshots)
+
+	if [[ "${#avd_snapshot_dirs[@]}" -eq 0 ]]; then
+		echo -e "  No Quick Boot snapshots found."
+	else
+		echo -e "  Quick Boot snapshots (${#avd_snapshot_dirs[@]} AVD(s)):"
+		for d in "${avd_snapshot_dirs[@]}"; do
+			avd_name=$(basename "$(dirname "$d")")
+			echo -e "    - ${avd_name%.avd}  ($(path_size "$d"))"
+		done
+		estimated_bytes=$(estimate_deletion_bytes "${avd_snapshot_dirs[@]}")
+		estimated_size=$(format_bytes "$estimated_bytes")
+		print_deletion_estimate "$estimated_bytes"
+		echo -e "  Note : the next launch of each device cold boots instead of resuming."
+		echo -e "         The device itself is kept — its userdata image, installed apps,"
+		echo -e "         debug.keystore and adbkey are never touched."
+
+		if confirm "  Delete Quick Boot snapshots?"; then
+			for d in "${avd_snapshot_dirs[@]}"; do
+				rm -rf "$d"
+			done
+			record_path_cleanup "$estimated_bytes"
+			echo -e "  ${GREEN}✓ Deleted snapshots for ${#avd_snapshot_dirs[@]} AVD(s) (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
+	fi
+fi
+
+# ── 40. Android SDK repository cache ────────────────────────────────────────
+
+delete_folder \
+	"Android SDK repository cache" \
+	"$HOME/.android/cache" \
+	"Downloaded sdkbin-*.xml package manifests for the SDK Manager. Re-fetched on next SDK check."
 
 # ── summary ───────────────────────────────────────────────────────────────────
 
