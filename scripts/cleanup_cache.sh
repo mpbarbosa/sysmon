@@ -213,6 +213,30 @@ collect_orphan_claude_projects() {
 	done
 }
 
+# Cursor keeps its workspace checkpoints as a bare git object store, one per
+# workspace, under ~/.config/Cursor/snapshots/stores/<id>/objects. A repack that
+# is interrupted leaves the packfile it was writing behind as objects/pack/.tmp*,
+# and nothing ever collects those: on the development machine 84 of them held
+# 8.35G against 1.49G of live packs.
+#
+# They are unreachable by construction. git reads a pack only through a matching
+# .idx, and a temp write has none, so no object in a .tmp* file can be found even
+# while the file sits there. Deleting one cannot lose a checkpoint.
+#
+# The age gate is the one guard that matters. A repack running right now owns its
+# temp file, and removing it mid-write would corrupt that repack, so only files a
+# day or more old are listed -- by then no live repack holds them.
+collect_stale_cursor_snapshot_temp_packs() {
+	local stores_dir="$HOME/.config/Cursor/snapshots/stores"
+
+	[[ -d "$stores_dir" ]] || return 0
+
+	# -mindepth/-maxdepth 4 pins the match to <id>/objects/pack/.tmp*, so a .tmp*
+	# file anywhere else under the store is left alone.
+	find "$stores_dir" -mindepth 4 -maxdepth 4 -path '*/objects/pack/.tmp*' \
+		-type f -mtime +1 -print 2>/dev/null || true
+}
+
 # Resolves an nvm alias value to the installed version it selects, printing
 # nothing when it selects none. Accepts "26", "26.13.0", "v26.13.0" and
 # "lts/<name>". lts aliases chain — lts/* holds "lts/lithium", which holds the
@@ -378,6 +402,7 @@ gather_cleanup_estimate_candidates() {
 	local proj
 	local last
 	local age
+	local temp_pack
 	local hls_ver
 	local lib_dir
 	local ghc_ver
@@ -408,6 +433,10 @@ gather_cleanup_estimate_candidates() {
 		"$HOME/.cache/huggingface/hub"
 		"$HOME/.config/Code/Cache"
 		"$HOME/.config/Code/CachedExtensionVSIXs"
+		"$HOME/.config/Code/CachedData"
+		"$HOME/.config/Cursor/Cache"
+		"$HOME/.config/Cursor/CachedExtensionVSIXs"
+		"$HOME/.config/Cursor/CachedData"
 		"$HOME/.config/google-chrome/Default/Service Worker/CacheStorage"
 		"$HOME/.gradle/caches"
 	)
@@ -569,6 +598,10 @@ except Exception:
 		[[ -n "$orphan" ]] && append_cleanup_candidates "$orphan"
 	done < <(collect_orphan_claude_projects)
 
+	while IFS= read -r temp_pack; do
+		[[ -n "$temp_pack" ]] && append_cleanup_candidates "$temp_pack"
+	done < <(collect_stale_cursor_snapshot_temp_packs)
+
 	if [[ -d "$MPBARBOSA_BACKUPS_DIR" ]]; then
 		mapfile -t backups < <(ls -1t "$MPBARBOSA_BACKUPS_DIR")
 		if [[ "${#backups[@]}" -gt 1 ]]; then
@@ -639,6 +672,102 @@ delete_folder() {
 		echo -e "  ${GREEN}✓ Deleted (deletion estimate: $estimated_size)${RESET}"
 	else
 		echo -e "  Skipped."
+	fi
+}
+
+# Reads the project path a workspaceStorage entry records in its workspace.json.
+# The entry's own path is passed as argv rather than interpolated into the
+# program text. In practice that path is $HOME plus a hex name, so this is
+# hardening rather than a fix: it only matters if $HOME holds a quote or a
+# backslash, which would otherwise end the python string mid-program.
+workspace_folder_of() {
+	python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1] + '/workspace.json'))
+    print(d.get('folder', '').replace('file://', '') or d.get('workspace', ''))
+except Exception:
+    print('')
+" "${1%/}" 2>/dev/null || true
+}
+
+# VS Code, VS Code Insiders and Cursor are the same editor, so one
+# workspaceStorage layout serves all three: an entry per workspace, each
+# recording its project path, plus state.vscdb.backup files SQLite leaves
+# behind. Sections 19, 20 and 37 are this function with a different path.
+#
+# An entry is orphaned when the project path it records no longer exists. A
+# missing or unreadable workspace.json counts as orphaned too: the entry then
+# names no project at all, so nothing can ever reopen it.
+clean_workspace_storage() {
+	local label="$1"
+	local ws_storage="$2"
+	local d f ws
+	local estimated_bytes estimated_size
+	local -a orphans=()
+	local -a backups=()
+
+	print_header "$label"
+
+	if [[ ! -d "$ws_storage" ]]; then
+		echo -e "${YELLOW}  Not found, skipping: $ws_storage${RESET}"
+		return
+	fi
+
+	for d in "$ws_storage"/*/; do
+		# An empty storage dir leaves the glob unexpanded; without this guard the
+		# literal '*/' path reads as an entry naming no project, i.e. an orphan.
+		[[ -d "$d" ]] || continue
+		ws=$(workspace_folder_of "$d")
+		if [[ -z "$ws" ]] || { [[ ! -d "$ws" ]] && [[ ! -f "$ws" ]]; }; then
+			orphans+=("$d")
+		fi
+	done
+
+	if [[ "${#orphans[@]}" -eq 0 ]]; then
+		echo -e "  No orphaned workspace entries found."
+	else
+		echo -e "  Orphaned entries (${#orphans[@]}) — project folder no longer exists:"
+		for d in "${orphans[@]}"; do
+			ws=$(workspace_folder_of "$d")
+			echo -e "    - $(basename "$d")  ($(path_size "$d"))  ${ws:-<no workspace.json>}"
+		done
+		estimated_bytes=$(estimate_deletion_bytes "${orphans[@]}")
+		estimated_size=$(format_bytes "$estimated_bytes")
+		print_deletion_estimate "$estimated_bytes"
+
+		if confirm "  Delete orphaned entries?"; then
+			for d in "${orphans[@]}"; do
+				rm -rf "$d"
+			done
+			record_path_cleanup "$estimated_bytes"
+			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
+	fi
+
+	while IFS= read -r -d '' f; do
+		backups+=("$f")
+	done < <(find "$ws_storage" -name "state.vscdb.backup" -print0 2>/dev/null)
+
+	if [[ "${#backups[@]}" -gt 0 ]]; then
+		echo -e "  Found ${#backups[@]} state.vscdb.backup file(s):"
+		for f in "${backups[@]}"; do
+			echo -e "    - $f  ($(path_size "$f"))"
+		done
+		estimated_bytes=$(estimate_deletion_bytes "${backups[@]}")
+		estimated_size=$(format_bytes "$estimated_bytes")
+		print_deletion_estimate "$estimated_bytes"
+		if confirm "  Delete .vscdb.backup files?"; then
+			for f in "${backups[@]}"; do
+				rm -f "$f"
+			done
+			record_path_cleanup "$estimated_bytes"
+			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
 	fi
 }
 
@@ -991,163 +1120,17 @@ delete_folder \
 	"$HOME/.config/Code/CachedExtensionVSIXs" \
 	"Downloaded VSIX packages. Pure download cache — re-fetched by VS Code on demand."
 
-# ── 19. VS Code WorkspaceStorage — orphaned entries ──────────────────────────
+# ── 19. VS Code WorkspaceStorage — orphaned entries + vscdb backups ─────────
 
-print_header "VS Code WorkspaceStorage — orphaned entries"
-
-WS_STORAGE="$HOME/.config/Code/User/workspaceStorage"
-
-if [[ ! -d "$WS_STORAGE" ]]; then
-	echo -e "${YELLOW}  Not found, skipping: $WS_STORAGE${RESET}"
-else
-	orphans=()
-	for d in "$WS_STORAGE"/*/; do
-		ws=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$d/workspace.json'))
-    print(d.get('folder','').replace('file://','') or d.get('workspace',''))
-except Exception:
-    print('')
-" 2>/dev/null)
-		if [[ -z "$ws" ]] || { [[ ! -d "$ws" ]] && [[ ! -f "$ws" ]]; }; then
-			orphans+=("$d")
-		fi
-	done
-
-	if [[ "${#orphans[@]}" -eq 0 ]]; then
-		echo -e "  No orphaned workspace entries found."
-	else
-		echo -e "  Orphaned entries (${#orphans[@]}) — project folder no longer exists:"
-		for d in "${orphans[@]}"; do
-			ws=$(python3 -c "
-import json
-try:
-    d = json.load(open('${d}workspace.json'))
-    print(d.get('folder','').replace('file://','') or d.get('workspace',''))
-except Exception:
-    print('<no workspace.json>')
-" 2>/dev/null)
-			echo -e "    - $(basename "$d")  ($(path_size "$d"))  $ws"
-		done
-		estimated_bytes=$(estimate_deletion_bytes "${orphans[@]}")
-		estimated_size=$(format_bytes "$estimated_bytes")
-		print_deletion_estimate "$estimated_bytes"
-
-		if confirm "  Delete orphaned entries?"; then
-			for d in "${orphans[@]}"; do
-				rm -rf "$d"
-			done
-			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (deletion estimate: $estimated_size)${RESET}"
-		else
-			echo -e "  Skipped."
-		fi
-	fi
-
-	backups=()
-	while IFS= read -r -d '' f; do
-		backups+=("$f")
-	done < <(find "$WS_STORAGE" -name "state.vscdb.backup" -print0 2>/dev/null)
-
-	if [[ "${#backups[@]}" -gt 0 ]]; then
-		echo -e "  Found ${#backups[@]} state.vscdb.backup file(s):"
-		for f in "${backups[@]}"; do
-			echo -e "    - $f  ($(path_size "$f"))"
-		done
-		estimated_bytes=$(estimate_deletion_bytes "${backups[@]}")
-		estimated_size=$(format_bytes "$estimated_bytes")
-		print_deletion_estimate "$estimated_bytes"
-		if confirm "  Delete .vscdb.backup files?"; then
-			for f in "${backups[@]}"; do
-				rm -f "$f"
-			done
-			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (deletion estimate: $estimated_size)${RESET}"
-		else
-			echo -e "  Skipped."
-		fi
-	fi
-fi
+clean_workspace_storage \
+	"VS Code WorkspaceStorage — orphaned entries" \
+	"$HOME/.config/Code/User/workspaceStorage"
 
 # ── 20. VS Code Insiders WorkspaceStorage — orphaned entries + vscdb backups ─
 
-print_header "VS Code Insiders WorkspaceStorage — orphaned entries"
-
-WS_STORAGE_INSIDERS="$HOME/.config/Code - Insiders/User/workspaceStorage"
-
-if [[ ! -d "$WS_STORAGE_INSIDERS" ]]; then
-	echo -e "${YELLOW}  Not found, skipping: $WS_STORAGE_INSIDERS${RESET}"
-else
-	orphans=()
-	for d in "$WS_STORAGE_INSIDERS"/*/; do
-		ws=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$d/workspace.json'))
-    print(d.get('folder','').replace('file://','') or d.get('workspace',''))
-except Exception:
-    print('')
-" 2>/dev/null)
-		if [[ -z "$ws" ]] || { [[ ! -d "$ws" ]] && [[ ! -f "$ws" ]]; }; then
-			orphans+=("$d")
-		fi
-	done
-
-	if [[ "${#orphans[@]}" -eq 0 ]]; then
-		echo -e "  No orphaned workspace entries found."
-	else
-		echo -e "  Orphaned entries (${#orphans[@]}) — project folder no longer exists:"
-		for d in "${orphans[@]}"; do
-			ws=$(python3 -c "
-import json
-try:
-    d = json.load(open('${d}workspace.json'))
-    print(d.get('folder','').replace('file://','') or d.get('workspace',''))
-except Exception:
-    print('<no workspace.json>')
-" 2>/dev/null)
-			echo -e "    - $(basename "$d")  ($(path_size "$d"))  $ws"
-		done
-		estimated_bytes=$(estimate_deletion_bytes "${orphans[@]}")
-		estimated_size=$(format_bytes "$estimated_bytes")
-		print_deletion_estimate "$estimated_bytes"
-
-		if confirm "  Delete orphaned entries?"; then
-			for d in "${orphans[@]}"; do
-				rm -rf "$d"
-			done
-			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#orphans[@]} orphaned workspace storage entries (deletion estimate: $estimated_size)${RESET}"
-		else
-			echo -e "  Skipped."
-		fi
-	fi
-
-	backups=()
-	while IFS= read -r -d '' f; do
-		backups+=("$f")
-	done < <(find "$WS_STORAGE_INSIDERS" -name "state.vscdb.backup" -print0 2>/dev/null)
-
-	if [[ "${#backups[@]}" -gt 0 ]]; then
-		echo -e "  Found ${#backups[@]} state.vscdb.backup file(s):"
-		for f in "${backups[@]}"; do
-			echo -e "    - $f  ($(path_size "$f"))"
-		done
-		estimated_bytes=$(estimate_deletion_bytes "${backups[@]}")
-		estimated_size=$(format_bytes "$estimated_bytes")
-		print_deletion_estimate "$estimated_bytes"
-		if confirm "  Delete .vscdb.backup files?"; then
-			for f in "${backups[@]}"; do
-				rm -f "$f"
-			done
-			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#backups[@]} .vscdb.backup file(s) (deletion estimate: $estimated_size)${RESET}"
-		else
-			echo -e "  Skipped."
-		fi
-	fi
-fi
+clean_workspace_storage \
+	"VS Code Insiders WorkspaceStorage — orphaned entries" \
+	"$HOME/.config/Code - Insiders/User/workspaceStorage"
 
 # ── 21. Chrome Service Worker CacheStorage ───────────────────────────────────
 
@@ -1584,6 +1567,70 @@ delete_folder \
 	"Zed npm cache" \
 	"$HOME/.local/share/zed/node/cache" \
 	"npm cache_dir for the Node that Zed runs language servers and agent servers with: _cacache tarballs plus one _npx install tree per package version. Re-downloaded on demand. Zed's own extensions, languages, and db folders are untouched."
+
+# ── 34. Cursor HTTP cache ────────────────────────────────────────────────────
+
+delete_folder \
+	"Cursor HTTP cache" \
+	"$HOME/.config/Cursor/Cache" \
+	"Electron/Chromium HTTP cache for the editor UI and webviews. Rebuilt on next launch. Close Cursor first."
+
+# ── 35. Cursor cached extension VSIXs ───────────────────────────────────────
+
+delete_folder \
+	"Cursor cached extension VSIXs" \
+	"$HOME/.config/Cursor/CachedExtensionVSIXs" \
+	"Downloaded VSIX packages. Pure download cache — re-fetched by Cursor on demand."
+
+# ── 36. VS Code / Cursor CachedData ─────────────────────────────────────────
+
+delete_folder \
+	"VS Code CachedData" \
+	"$HOME/.config/Code/CachedData" \
+	"V8 code cache: compiled bytecode for the editor's own JavaScript, keyed by build. Stale entries are never collected when a build is replaced. Regenerated on next launch, which is slower once."
+
+delete_folder \
+	"Cursor CachedData" \
+	"$HOME/.config/Cursor/CachedData" \
+	"Same V8 code cache as VS Code's, for Cursor's builds. Regenerated on next launch, which is slower once."
+
+# ── 37. Cursor WorkspaceStorage — orphaned entries + vscdb backups ──────────
+
+clean_workspace_storage \
+	"Cursor WorkspaceStorage — orphaned entries" \
+	"$HOME/.config/Cursor/User/workspaceStorage"
+
+# ── 38. Cursor snapshots — abandoned temp packfiles ─────────────────────────
+
+print_header "Cursor snapshots — abandoned temp packfiles"
+
+mapfile -t cursor_temp_packs < <(collect_stale_cursor_snapshot_temp_packs)
+
+if [[ "${#cursor_temp_packs[@]}" -eq 0 ]]; then
+	echo -e "  No abandoned temp packfiles found."
+else
+	echo -e "  Abandoned temp packfiles (${#cursor_temp_packs[@]}) — left behind by interrupted repacks:"
+	for f in "${cursor_temp_packs[@]}"; do
+		echo -e "    - $(basename "$f")  ($(path_size "$f"))"
+	done
+	estimated_bytes=$(estimate_deletion_bytes "${cursor_temp_packs[@]}")
+	estimated_size=$(format_bytes "$estimated_bytes")
+	print_deletion_estimate "$estimated_bytes"
+	echo -e "  Note : git can only reach a pack through a matching .idx, which these"
+	echo -e "         never got, so no checkpoint is stored in them. Only files a day"
+	echo -e "         or more old are listed, leaving a running repack untouched, and"
+	echo -e "         the real history (pack-*.pack with its .idx) is left alone."
+
+	if confirm "  Delete abandoned temp packfiles?"; then
+		for f in "${cursor_temp_packs[@]}"; do
+			rm -f "$f"
+		done
+		record_path_cleanup "$estimated_bytes"
+		echo -e "  ${GREEN}✓ Deleted ${#cursor_temp_packs[@]} abandoned temp packfile(s) (deletion estimate: $estimated_size)${RESET}"
+	else
+		echo -e "  Skipped."
+	fi
+fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 
