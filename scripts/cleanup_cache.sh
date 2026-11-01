@@ -267,11 +267,20 @@ cursor_agent_versions_in_use() {
 # would risk deleting the very version in use, and that is the one outcome
 # worth refusing: cursor-agent on PATH from somewhere else is ordinary, while a
 # deleted live version leaves no binary to run.
+#
+# An install extracts into a dot-prefixed staging directory and renames it into
+# place when it finishes, so one that is interrupted leaves .<version> behind
+# for good: 349M of a five-week-old .2026.10.01-14929f9 sat here, while a
+# complete version of the same vintage measured 558M. Those are listed too, but
+# they need their own guard -- an install running right now owns its staging
+# directory -- so a dot-prefixed directory is only listed once it is a day old.
+# A plain `*/` glob never matches a leading dot, which is why they went unseen.
 collect_stale_cursor_agent_versions() {
 	local versions_dir="$HOME/.local/share/cursor-agent/versions"
 	local launcher="$HOME/.local/bin/cursor-agent"
 	local live="" target dir name
 	local -a in_use=()
+	local -a candidates=()
 
 	[[ -d "$versions_dir" ]] || return 0
 
@@ -289,13 +298,24 @@ collect_stale_cursor_agent_versions() {
 
 	mapfile -t in_use < <(cursor_agent_versions_in_use "$versions_dir")
 
-	for dir in "$versions_dir"/*/; do
+	# Both globs: `*/` skips a leading dot, `.[!.]*/` picks up the staging
+	# directories and skips `.` and `..`. A glob that matches nothing stays
+	# literal, which the -d test below drops.
+	candidates=("$versions_dir"/*/ "$versions_dir"/.[!.]*/)
+
+	for dir in "${candidates[@]}"; do
 		[[ -d "$dir" ]] || continue
 		name=$(basename "$dir")
 		[[ "$name" == "$live" ]] && continue
 		# `|| true`: grep finding nothing is not an error here.
 		if [[ "${#in_use[@]}" -gt 0 ]] \
 			&& printf '%s\n' "${in_use[@]}" | grep -qxF "$name"; then
+			continue
+		fi
+		# A staging directory an install is still writing is a day's grace away
+		# from being listed; a superseded version needs no such wait.
+		if [[ "$name" == .* ]] \
+			&& [[ -z "$(find "$dir" -maxdepth 0 -mtime +1 -print 2>/dev/null)" ]]; then
 			continue
 		fi
 		printf '%s\n' "${dir%/}"
@@ -1806,9 +1826,9 @@ delete_folder \
 	"$HOME/.android/cache" \
 	"Downloaded sdkbin-*.xml package manifests for the SDK Manager. Re-fetched on next SDK check."
 
-# ── 41. cursor-agent — old versions ─────────────────────────────────────────
+# ── 41. cursor-agent — old versions + abandoned installs ────────────────────
 
-print_header "cursor-agent — old versions"
+print_header "cursor-agent — old versions and abandoned installs"
 
 CURSOR_AGENT_DIR="$HOME/.local/share/cursor-agent/versions"
 
@@ -1823,7 +1843,7 @@ else
 		echo -e "  Only the version in use is present, nothing to delete."
 	else
 		echo -e "  Keeping : $(basename "$(dirname "$(readlink -e "$HOME/.local/bin/cursor-agent")")") (launcher symlink target)"
-		echo -e "  To delete (${#agent_versions[@]} old version(s)):"
+		echo -e "  To delete (${#agent_versions[@]}):"
 		for d in "${agent_versions[@]}"; do
 			echo -e "    - $(basename "$d")  ($(path_size "$d"))"
 		done
@@ -1831,14 +1851,17 @@ else
 		estimated_size=$(format_bytes "$estimated_bytes")
 		print_deletion_estimate "$estimated_bytes"
 		echo -e "  Note : any version a running cursor-agent is executing from is kept"
-		echo -e "         too, so an agent started before an update is never cut off."
+		echo -e "         too, so an agent started before an update is never cut off. A"
+		echo -e "         .<version> entry is a staging directory an install left behind;"
+		echo -e "         those are listed only once a day old, so an install in progress"
+		echo -e "         keeps its own."
 
 		if confirm "  Delete old cursor-agent versions?"; then
 			for d in "${agent_versions[@]}"; do
 				rm -rf "$d"
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Removed ${#agent_versions[@]} old cursor-agent version(s) (deletion estimate: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted ${#agent_versions[@]} cursor-agent directory(s) (deletion estimate: $estimated_size)${RESET}"
 		else
 			echo -e "  Skipped."
 		fi
