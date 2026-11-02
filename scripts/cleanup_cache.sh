@@ -154,6 +154,45 @@ docker_storage_bytes() {
 	echo "$total"
 }
 
+# Best-effort count of the bytes a full uv cache eviction would really free, in
+# bytes; echoes 0 when there is no cache. uv installs into a virtualenv by
+# hardlinking out of archive-v0, so a cached file and the installed file are one
+# inode: dropping the cache link frees nothing while the virtualenv still holds
+# the other link, yet du bills those blocks to the cache all the same. On the
+# development machine that gap was 7.2 GiB of a 9.0 GiB cache. An inode counts
+# only when every one of its links sits inside the cache, which keeps the number
+# to what actually comes back.
+#
+# Hardlinking is uv's default wherever the filesystem has no reflink support.
+# Under --link-mode=copy each side owns its inode and this still holds; under
+# reflink/clone the blocks are shared copy-on-write and this overstates, which is
+# why it stays an estimate.
+uv_reclaimable_archive_bytes() {
+	local cache_dir="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+	local archive_dir="$cache_dir/archive-v0"
+
+	if [[ ! -d "$archive_dir" ]]; then
+		echo 0
+		return 0
+	fi
+
+	# Two passes rather than one with %p: a link count has to be compared against
+	# links found anywhere in the cache, and counting paths instead of parsing them
+	# keeps filenames with spaces or newlines out of the arithmetic.
+	awk '
+		NR == FNR { seen[$1]++; next }
+		{ nlink[$1] = $2; blocks[$1] = $3 }
+		END {
+			for (i in nlink)
+				if (seen[i] >= nlink[i]) total += blocks[i]
+			printf "%d\n", total * 512
+		}
+	' \
+		<(find "$cache_dir" -type f -printf '%i\n' 2>/dev/null) \
+		<(find "$archive_dir" -type f -printf '%i %n %b\n' 2>/dev/null) \
+		2>/dev/null || echo 0
+}
+
 mark_cleanup_performed() {
 	any_cleanup_performed=true
 }
@@ -425,6 +464,43 @@ resolve_node_alias() {
 # skipped rather than parsed. Reading a major number out of such a name with
 # `grep -oP` matched nothing, which under set -e aborted the entire cleanup run
 # at this section and silently skipped every section after it.
+# uv names each cache bucket <family>-v<N> and bumps N when that bucket's layout
+# changes; a given uv reads only the current N and never opens an older one
+# again. Keeping the highest N per family therefore leaves exactly what this uv
+# uses and lists the abandoned predecessors — on the development machine
+# simple-v21, simple-v25, simple-v26, sdists-v9 and wheels-v6, about 104 MiB that
+# uv 0.13.6 cannot reach. archive-v0, which holds the unpacked package content,
+# is the only member of its own family and so is always the one kept.
+collect_superseded_uv_cache_buckets() {
+	local cache_dir="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+	local entry name family version
+	local -A newest=()
+
+	[[ -d "$cache_dir" ]] || return 0
+
+	for entry in "$cache_dir"/*-v[0-9]*; do
+		[[ -d "$entry" ]] || continue
+		name=$(basename "$entry")
+		family="${name%-v*}"
+		version="${name##*-v}"
+		# A suffix that is not a plain integer cannot be ordered, so leave it alone.
+		[[ "$version" =~ ^[0-9]+$ ]] || continue
+		if [[ -z "${newest[$family]:-}" ]] || (( version > newest[$family] )); then
+			newest[$family]="$version"
+		fi
+	done
+
+	for entry in "$cache_dir"/*-v[0-9]*; do
+		[[ -d "$entry" ]] || continue
+		name=$(basename "$entry")
+		family="${name%-v*}"
+		version="${name##*-v}"
+		[[ "$version" =~ ^[0-9]+$ ]] || continue
+		(( version == newest[$family] )) && continue
+		printf '%s\n' "$entry"
+	done
+}
+
 collect_node_versions() {
 	local nvm_node_dir="$HOME/.nvm/versions/node"
 	local entry
@@ -541,6 +617,7 @@ gather_cleanup_estimate_candidates() {
 	local temp_pack
 	local avd_snapshots
 	local agent_version
+	local uv_bucket
 	local hls_ver
 	local lib_dir
 	local ghc_ver
@@ -749,6 +826,10 @@ except Exception:
 		[[ -n "$agent_version" ]] && append_cleanup_candidates "$agent_version"
 	done < <(collect_stale_cursor_agent_versions)
 
+	while IFS= read -r uv_bucket; do
+		[[ -n "$uv_bucket" ]] && append_cleanup_candidates "$uv_bucket"
+	done < <(collect_superseded_uv_cache_buckets)
+
 	if [[ -d "$MPBARBOSA_BACKUPS_DIR" ]]; then
 		mapfile -t backups < <(ls -1t "$MPBARBOSA_BACKUPS_DIR")
 		if [[ "${#backups[@]}" -gt 1 ]]; then
@@ -760,7 +841,7 @@ except Exception:
 }
 
 emit_total_deletion_estimate_json() {
-	local estimated_bytes docker_bytes
+	local estimated_bytes docker_bytes uv_bytes
 	gather_cleanup_estimate_candidates
 	estimated_bytes=$(estimate_deletion_bytes "${cleanup_candidates[@]}")
 
@@ -770,6 +851,12 @@ emit_total_deletion_estimate_json() {
 	# understates the total by the largest single item on most machines.
 	docker_bytes=$(docker_storage_bytes)
 	(( estimated_bytes += docker_bytes )) || true
+
+	# Same shape as Docker: what a uv cache eviction frees cannot be read off a
+	# path, because du charges the cache for blocks the installed virtualenvs keep
+	# alive. Section 43 offers this for deletion, so it belongs in the total.
+	uv_bytes=$(uv_reclaimable_archive_bytes)
+	(( estimated_bytes += uv_bytes )) || true
 
 	printf '{"bytes":%s,"formatted":"%s"}\n' "$estimated_bytes" "$(format_bytes "$estimated_bytes")"
 }
@@ -1865,6 +1952,80 @@ else
 		else
 			echo -e "  Skipped."
 		fi
+	fi
+fi
+
+# ── 42. uv — superseded cache buckets ───────────────────────────────────────
+
+print_header "uv — superseded cache buckets"
+
+UV_CACHE_PATH="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+
+if [[ ! -d "$UV_CACHE_PATH" ]]; then
+	echo -e "${YELLOW}  Not found, skipping: $UV_CACHE_PATH${RESET}"
+else
+	mapfile -t uv_buckets < <(collect_superseded_uv_cache_buckets)
+
+	if [[ "${#uv_buckets[@]}" -eq 0 ]]; then
+		echo -e "  Only the buckets this uv reads are present, nothing to delete."
+	else
+		echo -e "  To delete (${#uv_buckets[@]}):"
+		for d in "${uv_buckets[@]}"; do
+			echo -e "    - $(basename "$d")  ($(path_size "$d"))"
+		done
+		estimated_bytes=$(estimate_deletion_bytes "${uv_buckets[@]}")
+		estimated_size=$(format_bytes "$estimated_bytes")
+		print_deletion_estimate "$estimated_bytes"
+		echo -e "  Note : uv bumps a bucket's -vN suffix when that bucket's layout"
+		echo -e "         changes and never reads the older suffix again. The highest"
+		echo -e "         suffix in each family is kept, so every bucket this uv uses"
+		echo -e "         stays — archive-v0, the unpacked package content, included."
+
+		if confirm "  Delete superseded uv cache buckets?"; then
+			for d in "${uv_buckets[@]}"; do
+				rm -rf "$d"
+			done
+			record_path_cleanup "$estimated_bytes"
+			echo -e "  ${GREEN}✓ Deleted ${#uv_buckets[@]} superseded bucket(s) (deletion estimate: $estimated_size)${RESET}"
+		else
+			echo -e "  Skipped."
+		fi
+	fi
+fi
+
+# ── 43. uv — package cache ──────────────────────────────────────────────────
+
+print_header "uv — package cache"
+
+UV_CACHE_PATH="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+
+if ! command -v uv &>/dev/null; then
+	echo -e "${YELLOW}  uv command not found, skipping.${RESET}"
+elif [[ ! -d "$UV_CACHE_PATH" ]]; then
+	echo -e "${YELLOW}  Not found, skipping: $UV_CACHE_PATH${RESET}"
+else
+	uv_bytes=$(uv_reclaimable_archive_bytes)
+	uv_size=$(format_bytes "$uv_bytes")
+	echo -e "  Path : ${BOLD}$UV_CACHE_PATH${RESET}"
+	echo -e "  ${RED}${BOLD}Evicts the whole cache — every bucket, not just unused entries.${RESET}"
+	print_deletion_estimate "$uv_bytes"
+	echo -e "  Note : installed virtualenvs keep working. uv installs by hardlinking"
+	echo -e "         out of archive-v0, so the cached file and the installed file are"
+	echo -e "         one inode, and dropping the cache link leaves the data in place."
+	echo -e "         That is also why this estimate sits far below what du reports for"
+	echo -e "         the cache: blocks a virtualenv still links are left out, because"
+	echo -e "         deleting the cache does not free them. The next resolve"
+	echo -e "         re-downloads what it needs; nothing installed is lost."
+
+	if confirm "  Evict the whole uv cache?"; then
+		if uv cache clean >/dev/null 2>&1; then
+			record_path_cleanup "$uv_bytes"
+			echo -e "  ${GREEN}✓ Evicted the uv cache (deletion estimate: $uv_size)${RESET}"
+		else
+			echo -e "${YELLOW}  uv cache clean failed, nothing was deleted.${RESET}"
+		fi
+	else
+		echo -e "  Skipped."
 	fi
 fi
 
