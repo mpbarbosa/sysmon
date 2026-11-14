@@ -591,21 +591,47 @@ collect_stale_node_versions() {
 
 # Every running process's current directory, one per line.
 #
-# One readlink over all of /proc, not one per process. The obvious loop costs a
-# fork per process -- 360 of them on this machine -- and a sweep that asked it
+# One call for all of /proc, not one per process. The obvious loop costs a fork
+# per process -- 760 of them on this machine, 4.2s -- and a sweep that asked it
 # about forty worktrees spent four seconds on each of them before timing out.
-# readlink takes every path in a single invocation, which is 0.02s for the lot.
+#
+# `stat -c %N` and not `readlink`: this machine's coreutils are uutils, whose
+# readlink stops dead at the first argument it cannot read. /proc is full of
+# root-owned processes, so one readlink over the whole glob returned a truncated
+# list under zsh and *nothing at all* under bash, where the glob's first element
+# is a root pid -- with exit status 1 and an empty stderr, so `|| true` hid it
+# completely and this gate silently never fired. stat reports each argument
+# independently in a single exec (0.03s), and GNU stat prints the same
+# "'link' -> 'target'" form, so the parse is portable.
+#
+# The sed anchors on the left-hand side, which is always /proc/<pid>/cwd and so
+# holds no quote or arrow of its own; the target comes last, so matching greedily
+# to the final quote is right even for a directory whose name contains " -> ".
 #
 # Command lines are deliberately not matched: an argv that merely mentions a
 # path reports a session that does not exist, the same trap the emulator check
 # above documents, and this is the reading that stands between a live session
 # and the loss of its checkout.
-#
-# A target readlink cannot resolve belongs to another user's process, which
-# cannot be sitting in our worktree; it is skipped and the exit status goes
-# non-zero for it, hence `|| true`.
 running_process_cwds() {
-	readlink /proc/[0-9]*/cwd 2>/dev/null || true
+	local -a cwds=()
+	local link
+
+	mapfile -t cwds < <(
+		stat -c '%N' /proc/[0-9]*/cwd 2>/dev/null \
+			| sed -n "s|^'/proc/[0-9]*/cwd' -> '\(.*\)'$|\1|p"
+	)
+
+	# A stat without %N would report nothing rather than fail, which this gate
+	# must never read as "no process is running". Pay the slow certain path
+	# instead: one readlink per process, each failure tolerated on its own.
+	if [[ "${#cwds[@]}" -eq 0 ]]; then
+		for link in /proc/[0-9]*/cwd; do
+			readlink "$link" 2>/dev/null || true
+		done
+		return 0
+	fi
+
+	printf '%s\n' "${cwds[@]}"
 }
 
 # True when some process's current directory is inside the given path.
@@ -616,6 +642,7 @@ running_process_cwds() {
 # gathered before a confirmation prompt is a stale answer by then.
 path_has_running_process() {
 	local dir cwd
+	local seen=0
 	local -a cwds=()
 
 	dir=$(normalize_path "$1")
@@ -629,8 +656,15 @@ path_has_running_process() {
 
 	for cwd in ${cwds[@]+"${cwds[@]}"}; do
 		[[ -n "$cwd" ]] || continue
+		seen=1
 		path_contains "$dir" "$cwd" && return 0
 	done
+
+	# Fails closed. An empty list is not "nothing is running": this script's own
+	# shell is a process with a working directory, so reading none at all means
+	# the read failed, and the question this gate answers is then unanswered.
+	# Keeping a worktree costs disk; deleting a live session's checkout costs work.
+	[[ "$seen" -eq 1 ]] || return 0
 
 	return 1
 }
@@ -2337,7 +2371,14 @@ print_header "Claude Code — finished worktrees"
 mapfile -t stale_worktrees < <(collect_stale_claude_worktrees)
 
 if [[ "${#stale_worktrees[@]}" -eq 0 ]]; then
-	echo -e "  No finished worktrees found."
+	if [[ -z "$(running_process_cwds)" ]]; then
+		# Nothing is offered in this state, and a bare "none found" would read as
+		# a clean bill of health rather than a check that could not be made.
+		echo -e "${YELLOW}  Could not read any process's working directory from /proc, so a"
+		echo -e "  running session cannot be ruled out. No worktrees are offered.${RESET}"
+	else
+		echo -e "  No finished worktrees found."
+	fi
 else
 	echo -e "  Finished worktrees (${#stale_worktrees[@]}) — clean, pushed, idle, nothing running inside:"
 	for d in "${stale_worktrees[@]}"; do
