@@ -8,7 +8,7 @@ A Wayland desktop widget developed with **Quickshell** that displays live CPU, m
 
 - `shell.qml`: the widget — renders the three metrics as progress bars, plus the deletion estimate and the "Clean Cache" button.
 - `scripts/sysmon.sh`: metrics collector. Reads `/proc/stat`, `/proc/meminfo`, and `df -P /`, and emits one line of JSON.
-- `scripts/cleanup_cache.sh`: the cache cleanup. Walks a curated list of caches and disposable files, prompting before each deletion.
+- `scripts/cleanup_cache.sh`: the cache cleanup. Walks a curated list of caches and disposable files, prompting before each deletion. `--list-sections` prints its 44 sections; `--only <number or title text>` runs just one of them.
 
 ## Metrics
 
