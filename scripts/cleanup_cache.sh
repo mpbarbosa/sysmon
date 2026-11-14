@@ -589,6 +589,160 @@ collect_stale_node_versions() {
 	done
 }
 
+# Every running process's current directory, one per line.
+#
+# One readlink over all of /proc, not one per process. The obvious loop costs a
+# fork per process -- 360 of them on this machine -- and a sweep that asked it
+# about forty worktrees spent four seconds on each of them before timing out.
+# readlink takes every path in a single invocation, which is 0.02s for the lot.
+#
+# Command lines are deliberately not matched: an argv that merely mentions a
+# path reports a session that does not exist, the same trap the emulator check
+# above documents, and this is the reading that stands between a live session
+# and the loss of its checkout.
+#
+# A target readlink cannot resolve belongs to another user's process, which
+# cannot be sitting in our worktree; it is skipped and the exit status goes
+# non-zero for it, hence `|| true`.
+running_process_cwds() {
+	readlink /proc/[0-9]*/cwd 2>/dev/null || true
+}
+
+# True when some process's current directory is inside the given path.
+#
+# Extra arguments are taken as an already-read cwd list, so a caller testing
+# many paths pays for one /proc read. Called with the path alone it reads /proc
+# itself, which is what the check immediately before a deletion wants: a list
+# gathered before a confirmation prompt is a stale answer by then.
+path_has_running_process() {
+	local dir cwd
+	local -a cwds=()
+
+	dir=$(normalize_path "$1")
+	shift
+
+	if [[ "$#" -gt 0 ]]; then
+		cwds=("$@")
+	else
+		mapfile -t cwds < <(running_process_cwds)
+	fi
+
+	for cwd in ${cwds[@]+"${cwds[@]}"}; do
+		[[ -n "$cwd" ]] || continue
+		path_contains "$dir" "$cwd" && return 0
+	done
+
+	return 1
+}
+
+# True when nothing in the worktree's own tree has been touched for `days`.
+#
+# node_modules and virtualenv directories are left out: an `npm ci` run weeks
+# after the last edit would otherwise make an abandoned checkout look busy.
+#
+# What this cannot see: a file edited deep in src/ moves no top-level mtime at
+# all. That is deliberate, and it is why the idle window is not the gate that
+# protects work -- the two checks in worktree_is_disposable and the liveness
+# read are. This one only keeps a worktree that is merely between turns from
+# being offered in the first place.
+#
+# The index git keeps for the worktree was tried as a second mtime and
+# REJECTED, because reading a worktree must not change how it reads next time.
+# A plain `git status` refreshes that index, so the disposability check below
+# would have aged its own candidates out of this gate -- and with the widget
+# re-estimating every 60 seconds, a worktree touched once would have stayed
+# hidden for the whole window. It also measured nothing the other gates miss:
+# an edit is either uncommitted, which the status check refuses, or committed,
+# which the origin check decides.
+worktree_is_idle() {
+	local wt="$1"
+	local days="$2"
+	local recent
+
+	# `find -quit` on the first match: the question is whether anything is
+	# newer than the cutoff, not how many things are.
+	recent=$(find "$wt" -mindepth 1 -maxdepth 1 \
+		-not -name node_modules -not -name '.venv*' \
+		-newermt "-${days} days" -print -quit 2>/dev/null || true)
+
+	[[ -z "$recent" ]]
+}
+
+# True when removing the worktree loses nothing at all.
+worktree_is_disposable() {
+	local wt="$1"
+	local unpushed
+
+	# Ignored files are not reported, and that is what makes this usable: a
+	# worktree's node_modules and its copied .env are ignored by the project,
+	# so they are not evidence of work. Anything else -- one modified line, one
+	# untracked file -- may exist only here, and refuses the worktree.
+	# --no-optional-locks so reading a worktree does not refresh its index:
+	# this check runs from the 60-second estimate, and a measurement that
+	# changes what it measures is the bug worktree_is_idle documents.
+	[[ -z "$(git --no-optional-locks -C "$wt" status --porcelain 2>/dev/null)" ]] || return 1
+
+	# Commits reachable from HEAD and from no origin/* ref. Merged or not does
+	# not matter: a pushed branch nobody merged is still safe, because the
+	# commits live on the server. Detached HEAD is covered the same way.
+	#
+	# Nothing is fetched here. A repository with no origin, or one whose remote
+	# refs are stale, counts its commits as unpushed and is left alone -- the
+	# error this can make is to keep a worktree, never to delete one.
+	unpushed=$(git -C "$wt" rev-list --count HEAD --not --remotes=origin 2>/dev/null) || return 1
+	[[ "$unpushed" == 0 ]]
+}
+
+# The main checkout a linked worktree belongs to. `git worktree list` always
+# prints it first, and `git worktree remove` has to be run from it.
+worktree_main_checkout() {
+	git -C "$1" worktree list --porcelain 2>/dev/null \
+		| awk '/^worktree /{ print substr($0, 10); exit }'
+}
+
+# Claude Code worktrees that are finished, in the two layouts this machine
+# uses: <repo>.worktrees/<name> beside the repository, which the desktop app
+# provisions, and <repo>/.claude/worktrees/<name>, which several projects
+# create by hand. Both are full checkouts carrying their own node_modules and
+# virtualenvs, which is why a handful of them outweighs every cache this script
+# offers: six left behind in one project held 4.4G, all of it rebuildable.
+#
+# A worktree is listed only when every gate passes, cheapest first:
+#   - .git is a file, not a directory, so it is a linked worktree and not a
+#     clone that happens to sit in that folder;
+#   - nothing in it has been touched for WORKTREE_IDLE_DAYS, because a clean
+#     worktree is not evidence of abandonment on its own -- a session between
+#     turns leaves exactly the same tree as a session that ended in March;
+#   - no live process has its cwd inside it, so a running session's checkout is
+#     never swept out from under it;
+#   - `git status` is empty and every commit is already on origin.
+#
+# Deliberately not consulted: whether the branch was merged. A branch pushed and
+# never merged has lost nothing when its worktree goes, and a merged branch
+# whose worktree still holds an untracked file has.
+collect_stale_claude_worktrees() {
+	local github_dir="$HOME/Documents/GitHub"
+	local idle_days="${WORKTREE_IDLE_DAYS:-14}"
+	local wt
+	local -a cwds=()
+
+	[[ -d "$github_dir" ]] || return 0
+
+	# Read once and reused for every candidate below.
+	mapfile -t cwds < <(running_process_cwds)
+
+	# A glob that matches nothing stays literal, which the -d test drops.
+	for wt in "$github_dir"/*.worktrees/*/ "$github_dir"/*/.claude/worktrees/*/; do
+		wt=${wt%/}
+		[[ -d "$wt" ]] || continue
+		[[ -f "$wt/.git" ]] || continue
+		worktree_is_idle "$wt" "$idle_days" || continue
+		path_has_running_process "$wt" ${cwds[@]+"${cwds[@]}"} && continue
+		worktree_is_disposable "$wt" || continue
+		printf '%s\n' "$wt"
+	done
+}
+
 gather_cleanup_estimate_candidates() {
 	local PUPPETEER_DIR="$HOME/.cache/puppeteer/chrome"
 	local PUPPETEER_HEADLESS_DIR="$HOME/.cache/puppeteer/chrome-headless-shell"
@@ -618,6 +772,7 @@ gather_cleanup_estimate_candidates() {
 	local avd_snapshots
 	local agent_version
 	local uv_bucket
+	local worktree
 	local hls_ver
 	local lib_dir
 	local ghc_ver
@@ -830,6 +985,10 @@ except Exception:
 		[[ -n "$uv_bucket" ]] && append_cleanup_candidates "$uv_bucket"
 	done < <(collect_superseded_uv_cache_buckets)
 
+	while IFS= read -r worktree; do
+		[[ -n "$worktree" ]] && append_cleanup_candidates "$worktree"
+	done < <(collect_stale_claude_worktrees)
+
 	if [[ -d "$MPBARBOSA_BACKUPS_DIR" ]]; then
 		mapfile -t backups < <(ls -1t "$MPBARBOSA_BACKUPS_DIR")
 		if [[ "${#backups[@]}" -gt 1 ]]; then
@@ -861,10 +1020,114 @@ emit_total_deletion_estimate_json() {
 	printf '{"bytes":%s,"formatted":"%s"}\n' "$estimated_bytes" "$(format_bytes "$estimated_bytes")"
 }
 
+# The walkthrough below is 44 sections of top-level code in file order, each
+# opened by a `# ── <n>. <title> ──` comment. --only runs one of them and
+# nothing else, by reading those markers out of this file and sourcing just the
+# lines between the match and the next marker.
+#
+# So the markers are structure, not decoration: renaming one changes what --only
+# selects, and dropping the `<n>.` prefix hides that section from both --only
+# and --list-sections while leaving the full walkthrough unchanged -- a break
+# nothing else in the script would notice.
+#
+# Sections are not functions and were never written to be reorderable, so one
+# that leans on a variable an earlier section set works in the full run and
+# dies under --only on `unbound variable`. TWO DID when this was added: 28 read
+# 27's GHCUP_GHC_DIR and 31 read 24's GITHUB_DIR, and both now default their
+# own. Reading the sections did not find that -- running all 44 in isolation
+# did, which is the check to repeat after adding one.
+SELF="${BASH_SOURCE[0]}"
+SECTION_MARKER='^# ── [0-9]+\. '
+
+# The numbered sections, as "<n>  <title>".
+#
+# Parsed with bash parameter expansion rather than sed: the marker's trailing
+# rule is drawn with U+2500, and matching that in a bracket expression depends
+# on the locale, while `${title%% ─*}` is a literal byte-wise suffix match that
+# behaves the same under LC_ALL=C.
+list_cleanup_sections() {
+	local line num title
+
+	while IFS= read -r line; do
+		num=${line#'# ── '}
+		num=${num%%.*}
+		title=${line#*". "}
+		title=${title%% ─*}
+		printf '  %2s  %s\n' "$num" "$title"
+	done < <(grep -E "$SECTION_MARKER" "$SELF")
+}
+
+# Start and end line of each section matching the pattern, one "start end" pair
+# per line. A pattern that is all digits matches a section number exactly;
+# anything else is a case-insensitive substring of the marker, so `--only
+# worktree` and `--only 44` select the same section.
+select_cleanup_sections() {
+	awk -v pat="$1" '
+		/^# ── [0-9]+\. / {
+			if (start) { print start, NR - 1; start = 0 }
+			num = $0; sub(/^# ── /, "", num); sub(/\..*$/, "", num)
+			if (pat ~ /^[0-9]+$/ ? num == pat : index(tolower($0), tolower(pat)))
+				start = NR
+			next
+		}
+		# The summary closes the last section; without this a match on the last
+		# one would swallow it and print the totals twice.
+		/^# ── summary/ { if (start) { print start, NR - 1; start = 0 } }
+		END { if (start) print start, NR }
+	' "$SELF"
+}
+
+run_selected_sections() {
+	local pattern="$1"
+	local range start end
+	local -a ranges=()
+
+	mapfile -t ranges < <(select_cleanup_sections "$pattern")
+
+	if [[ "${#ranges[@]}" -eq 0 ]]; then
+		echo -e "${YELLOW}No section matches '$pattern'.${RESET} Sections are:" >&2
+		list_cleanup_sections >&2
+		return 1
+	fi
+
+	for range in "${ranges[@]}"; do
+		start=${range%% *}
+		end=${range##* }
+		# Sourced, not run as a separate process: the prompts, the running
+		# totals and the helpers have to be the ones this shell already holds.
+		# shellcheck source=/dev/null  # the text comes from this very file
+		source <(sed -n "${start},${end}p" "$SELF")
+	done
+}
+
+print_cleanup_summary() {
+	if (( total_estimated_bytes > 0 )); then
+		echo -e "\n${GREEN}${BOLD}Cleanup complete. Total deletion estimate: $(format_bytes "$total_estimated_bytes")${RESET}\n"
+	elif [[ "$any_cleanup_performed" == true ]]; then
+		echo -e "\n${GREEN}${BOLD}Cleanup complete.${RESET}\n"
+	else
+		echo -e "\n${GREEN}${BOLD}Cleanup complete. Nothing was deleted.${RESET}\n"
+	fi
+}
+
+only_pattern=""
+
 case "${1:-}" in
 --estimate-total-json)
 	emit_total_deletion_estimate_json
 	exit 0
+	;;
+--list-sections)
+	list_cleanup_sections
+	exit 0
+	;;
+--only)
+	only_pattern="${2:-}"
+	if [[ -z "$only_pattern" ]]; then
+		echo "usage: ${SELF##*/} --only <section number or title text>" >&2
+		echo "       ${SELF##*/} --list-sections" >&2
+		exit 2
+	fi
 	;;
 esac
 
@@ -1004,6 +1267,15 @@ clean_workspace_storage() {
 		fi
 	fi
 }
+
+# --only runs here and nowhere earlier: every helper a section calls -- confirm,
+# print_header, delete_folder, clean_workspace_storage -- is defined above this
+# line, and a section sourced before them would die on its first prompt.
+if [[ -n "$only_pattern" ]]; then
+	run_selected_sections "$only_pattern" || exit 1
+	print_cleanup_summary
+	exit 0
+fi
 
 # ── 1. JetBrains cache ────────────────────────────────────────────────────────
 
@@ -1552,11 +1824,33 @@ else
 		print_deletion_estimate "$estimated_bytes"
 
 		if confirm "  Delete older versions? (requires sudo)"; then
+			aws_deleted=0
+			aws_bytes=0
+
 			for v in "${old_versions[@]}"; do
-				sudo rm -rf "${AWS_CLI_DIR:?}/$v"
+				# Measured before the removal, and the status checked after it.
+				# Unguarded, a refused sudo took the whole walkthrough down with
+				# it under set -e: this is section 26 of 44, and a run that could
+				# not elevate here never reached the eighteen sections after it,
+				# with nothing on screen to say why.
+				aws_version_bytes=$(estimate_deletion_bytes "$AWS_CLI_DIR/$v")
+
+				if sudo rm -rf "${AWS_CLI_DIR:?}/$v"; then
+					aws_deleted=$(( aws_deleted + 1 ))
+					aws_bytes=$(( aws_bytes + aws_version_bytes ))
+				else
+					echo -e "${YELLOW}  sudo refused, left alone: $v${RESET}"
+				fi
 			done
-			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
+
+			# Only what was really deleted reaches the total, so the summary
+			# cannot claim 831M that sudo declined to free.
+			if (( aws_deleted > 0 )); then
+				record_path_cleanup "$aws_bytes"
+				echo -e "  ${GREEN}✓ Deleted $aws_deleted older version(s) (deletion estimate: $(format_bytes "$aws_bytes"))${RESET}"
+			else
+				echo -e "${YELLOW}  Nothing was deleted.${RESET}"
+			fi
 		else
 			echo -e "  Skipped."
 		fi
@@ -1610,6 +1904,9 @@ fi
 print_header "HLS lib — unused GHC version builds"
 
 GHCUP_HLS_DIR="$HOME/.ghcup/hls"
+# Section 27 sets this as well. Defaulted rather than read, so this section
+# stands on its own under --only; the full run still uses 27's value.
+GHCUP_GHC_DIR="${GHCUP_GHC_DIR:-$HOME/.ghcup/ghc}"
 
 if [[ ! -d "$GHCUP_HLS_DIR" ]]; then
 	echo -e "${YELLOW}  Not found, skipping: $GHCUP_HLS_DIR${RESET}"
@@ -1732,6 +2029,10 @@ fi
 # ── 31. Temporary files in GitHub projects ───────────────────────────────────
 
 print_header "Temporary files in GitHub projects"
+
+# Section 24 sets this as well. Defaulted rather than read, so this section
+# stands on its own under --only; the full run still uses 24's value.
+GITHUB_DIR="${GITHUB_DIR:-$HOME/Documents/GitHub}"
 
 if [[ ! -d "$GITHUB_DIR" ]]; then
 	echo -e "${YELLOW}  Not found, skipping: $GITHUB_DIR${RESET}"
@@ -2029,12 +2330,73 @@ else
 	fi
 fi
 
+# ── 44. Claude Code — finished worktrees ────────────────────────────────────
+
+print_header "Claude Code — finished worktrees"
+
+mapfile -t stale_worktrees < <(collect_stale_claude_worktrees)
+
+if [[ "${#stale_worktrees[@]}" -eq 0 ]]; then
+	echo -e "  No finished worktrees found."
+else
+	echo -e "  Finished worktrees (${#stale_worktrees[@]}) — clean, pushed, idle, nothing running inside:"
+	for d in "${stale_worktrees[@]}"; do
+		echo -e "    - ${d#"$HOME"/}  ($(path_size "$d"))"
+	done
+	estimated_bytes=$(estimate_deletion_bytes "${stale_worktrees[@]}")
+	estimated_size=$(format_bytes "$estimated_bytes")
+	print_deletion_estimate "$estimated_bytes"
+	echo -e "  Note : removed with 'git worktree remove', never rm -rf, so the"
+	echo -e "         registration goes with the directory. A worktree deleted by hand"
+	echo -e "         leaves an entry behind in 'git worktree list' that someone else"
+	echo -e "         has to clear. Branches are left alone — they cost no disk, and"
+	echo -e "         the commits are on origin either way. A worktree with a modified"
+	echo -e "         or untracked file, with a commit that is not on origin, with a"
+	echo -e "         process inside it, or touched in the last ${WORKTREE_IDLE_DAYS:-14} days, is"
+	echo -e "         never listed above."
+
+	if confirm "  Remove finished worktrees?"; then
+		removed_worktrees=0
+		worktree_bytes=0
+
+		for d in "${stale_worktrees[@]}"; do
+			# Re-measured per worktree, immediately before the removal. The list
+			# above was taken before a prompt that may have sat unanswered for an
+			# hour, and a session can have moved into one of these since.
+			if path_has_running_process "$d" || ! worktree_is_disposable "$d"; then
+				echo -e "${YELLOW}  Changed since the estimate, left alone: $d${RESET}"
+				continue
+			fi
+
+			main_checkout=$(worktree_main_checkout "$d")
+			if [[ -z "$main_checkout" ]]; then
+				echo -e "${YELLOW}  Could not find the main checkout, left alone: $d${RESET}"
+				continue
+			fi
+
+			worktree_size_bytes=$(estimate_deletion_bytes "$d")
+
+			if git -C "$main_checkout" worktree remove "$d" >/dev/null 2>&1; then
+				removed_worktrees=$(( removed_worktrees + 1 ))
+				worktree_bytes=$(( worktree_bytes + worktree_size_bytes ))
+			else
+				echo -e "${YELLOW}  git worktree remove refused, left alone: $d${RESET}"
+			fi
+		done
+
+		if (( removed_worktrees > 0 )); then
+			record_path_cleanup "$worktree_bytes"
+			echo -e "  ${GREEN}✓ Removed $removed_worktrees worktree(s) (deletion estimate: $(format_bytes "$worktree_bytes"))${RESET}"
+		else
+			echo -e "${YELLOW}  Nothing was removed.${RESET}"
+		fi
+	else
+		echo -e "  Skipped."
+	fi
+fi
+
 # ── summary ───────────────────────────────────────────────────────────────────
 
-if (( total_estimated_bytes > 0 )); then
-	echo -e "\n${GREEN}${BOLD}Cleanup complete. Total deletion estimate: $(format_bytes "$total_estimated_bytes")${RESET}\n"
-elif [[ "$any_cleanup_performed" == true ]]; then
-	echo -e "\n${GREEN}${BOLD}Cleanup complete.${RESET}\n"
-else
-	echo -e "\n${GREEN}${BOLD}Cleanup complete. Nothing was deleted.${RESET}\n"
-fi
+print_cleanup_summary
+
+read -rp "Press Enter to exit..."
