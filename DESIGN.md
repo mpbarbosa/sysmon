@@ -163,4 +163,4 @@ The script is interactive by design and cannot be made non-interactive without s
 
    Terminal selection is not a pure substitution, which is why it is still open: the argument conventions differ (`gnome-terminal -- <cmd>`, `xterm -e <cmd>`, `kitty <cmd>`), so a candidate list has to carry each terminal's argv form rather than just its binary name.
 
-2. **sudo prompts in cleanup_cache.sh.** Section 28 (AWS CLI old versions) calls `sudo rm -rf`. When launched from the widget via `gnome-terminal`, the sudo prompt appears in the terminal window and works correctly. No special handling is needed, but this behavior is worth documenting for contributors who might consider running the script non-interactively.
+2. **sudo prompts in cleanup_cache.sh.** Section 26 (AWS CLI old versions) calls `sudo rm -rf`, and section 45 (Snap disabled revisions) calls `sudo snap remove --revision`. When launched from the widget via `gnome-terminal`, the sudo prompt appears in the terminal window and works correctly. No special handling is needed, but this behavior is worth documenting for contributors who might consider running the script non-interactively.
