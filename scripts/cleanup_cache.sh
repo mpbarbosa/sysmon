@@ -501,6 +501,58 @@ collect_superseded_uv_cache_buckets() {
 	done
 }
 
+# snapd keeps the previous revision of every snap after a refresh, marked
+# "disabled" in `snap list --all`, so `snap revert` has something to go back to.
+# refresh.retain cannot go below 2, so this is not a one-off: every refresh
+# leaves a new one behind. On the development machine that was 32 revisions and
+# 4.4 GiB of a 9.7 GiB /var/lib/snapd/snaps.
+#
+# snapd is the only thing that may remove them. Deleting the .snap file by hand
+# leaves a mount unit and state.json still pointing at the revision. So this
+# lists "<name> <revision> <file>" for `snap remove --revision` to act on, and
+# the file only for measuring. A revision whose file is missing is left out:
+# that is a state this script did not create and should not try to explain.
+#
+# The Notes column is matched as one whole comma-separated word ("base,disabled",
+# "disabled,classic"), never as a substring, so a note that merely contains the
+# letters cannot offer a live revision. Sideloaded revisions are numbered x1, x2.
+collect_disabled_snap_revisions() {
+	local snaps_dir="${SNAPD_SNAPS_DIR:-/var/lib/snapd/snaps}"
+	local name rev file
+
+	command -v snap >/dev/null 2>&1 || return 0
+
+	while read -r name rev; do
+		[[ -n "$name" && "$rev" =~ ^x?[0-9]+$ ]] || continue
+		file="$snaps_dir/${name}_${rev}.snap"
+		[[ -f "$file" ]] || continue
+		printf '%s %s %s\n' "$name" "$rev" "$file"
+	done < <(
+		LC_ALL=C snap list --all 2>/dev/null |
+			awk 'NR > 1 && ("," $NF ",") ~ /,disabled,/ { print $1, $3 }'
+	) || true
+}
+
+# Disk use of the given .snap files, in bytes. They are mode 0600 root, so the
+# estimate_deletion_bytes route refuses them as unreadable and reports 0 with a
+# warning per file. stat needs only the directory, which is world-readable, and
+# reads allocated blocks (%b × %B) the way du would.
+snap_files_bytes() {
+	[[ "$#" -eq 0 ]] && { echo 0; return 0; }
+	stat -c '%b %B' -- "$@" 2>/dev/null |
+		awk '{ total += $1 * $2 } END { printf "%d\n", total }' || echo 0
+}
+
+# Every disabled revision collect_disabled_snap_revisions would offer, in bytes.
+disabled_snap_revisions_bytes() {
+	local -a files=()
+	local name rev file
+	while read -r name rev file; do
+		[[ -n "$file" ]] && files+=("$file")
+	done < <(collect_disabled_snap_revisions)
+	snap_files_bytes "${files[@]}"
+}
+
 collect_node_versions() {
 	local nvm_node_dir="$HOME/.nvm/versions/node"
 	local entry
@@ -1064,7 +1116,7 @@ except Exception:
 }
 
 emit_total_deletion_estimate_json() {
-	local estimated_bytes docker_bytes uv_bytes
+	local estimated_bytes docker_bytes uv_bytes snap_bytes
 	gather_cleanup_estimate_candidates
 	estimated_bytes=$(estimate_deletion_bytes "${cleanup_candidates[@]}")
 
@@ -1081,10 +1133,15 @@ emit_total_deletion_estimate_json() {
 	uv_bytes=$(uv_reclaimable_archive_bytes)
 	(( estimated_bytes += uv_bytes )) || true
 
+	# Disabled snap revisions are root-only files, which the du route refuses as
+	# unreadable, so they are measured with stat and added here. Section 45.
+	snap_bytes=$(disabled_snap_revisions_bytes)
+	(( estimated_bytes += snap_bytes )) || true
+
 	printf '{"bytes":%s,"formatted":"%s"}\n' "$estimated_bytes" "$(format_bytes "$estimated_bytes")"
 }
 
-# The walkthrough below is 44 sections of top-level code in file order, each
+# The walkthrough below is 45 sections of top-level code in file order, each
 # opened by a `# ── <n>. <title> ──` comment. --only runs one of them and
 # nothing else, by reading those markers out of this file and sourcing just the
 # lines between the match and the next marker.
@@ -1098,7 +1155,7 @@ emit_total_deletion_estimate_json() {
 # that leans on a variable an earlier section set works in the full run and
 # dies under --only on `unbound variable`. TWO DID when this was added: 28 read
 # 27's GHCUP_GHC_DIR and 31 read 24's GITHUB_DIR, and both now default their
-# own. Reading the sections did not find that -- running all 44 in isolation
+# own. Reading the sections did not find that -- running all 45 in isolation
 # did, which is the check to repeat after adding one.
 SELF="${BASH_SOURCE[0]}"
 SECTION_MARKER='^# ── [0-9]+\. '
@@ -1905,8 +1962,8 @@ else
 			for v in "${old_versions[@]}"; do
 				# Measured before the removal, and the status checked after it.
 				# Unguarded, a refused sudo took the whole walkthrough down with
-				# it under set -e: this is section 26 of 44, and a run that could
-				# not elevate here never reached the eighteen sections after it,
+				# it under set -e: this is section 26 of 45, and a run that could
+				# not elevate here never reached the nineteen sections after it,
 				# with nothing on screen to say why.
 				aws_version_bytes=$(estimate_deletion_bytes "$AWS_CLI_DIR/$v")
 
@@ -2469,6 +2526,60 @@ else
 		if (( removed_worktrees > 0 )); then
 			record_path_cleanup "$worktree_bytes"
 			echo -e "  ${GREEN}✓ Removed $removed_worktrees worktree(s) (deletion estimate: $(format_bytes "$worktree_bytes"))${RESET}"
+		else
+			echo -e "${YELLOW}  Nothing was removed.${RESET}"
+		fi
+	else
+		echo -e "  Skipped."
+	fi
+fi
+
+# ── 45. Snap — disabled revisions ───────────────────────────────────────────
+
+print_header "Snap — disabled revisions"
+
+mapfile -t disabled_snaps < <(collect_disabled_snap_revisions)
+
+if ! command -v snap >/dev/null 2>&1; then
+	echo -e "${YELLOW}  snap command not found, skipping.${RESET}"
+elif [[ "${#disabled_snaps[@]}" -eq 0 ]]; then
+	echo -e "  No disabled snap revisions found."
+else
+	disabled_snap_files=()
+	echo -e "  Disabled revisions (${#disabled_snaps[@]}) — kept only for 'snap revert':"
+	for entry in "${disabled_snaps[@]}"; do
+		read -r snap_name snap_rev snap_file <<<"$entry"
+		disabled_snap_files+=("$snap_file")
+		echo -e "    - $snap_name r$snap_rev  ($(format_bytes "$(snap_files_bytes "$snap_file")"))"
+	done
+	estimated_bytes=$(snap_files_bytes "${disabled_snap_files[@]}")
+	print_deletion_estimate "$estimated_bytes"
+	echo -e "  Note : removed with 'snap remove --revision', never rm, so snapd drops"
+	echo -e "         the mount and its own record along with the file. The current"
+	echo -e "         revision of every snap stays. 'snap revert' stops working for"
+	echo -e "         these snaps until their next refresh brings a new old revision."
+
+	if confirm "  Remove disabled snap revisions? (requires sudo)"; then
+		removed_snaps=0
+		snap_bytes=0
+
+		for entry in "${disabled_snaps[@]}"; do
+			read -r snap_name snap_rev snap_file <<<"$entry"
+			# Measured before the removal, and each status checked on its own:
+			# a refused sudo, or snapd busy with a refresh, must not end the run.
+			snap_rev_bytes=$(snap_files_bytes "$snap_file")
+
+			if sudo snap remove "$snap_name" --revision="$snap_rev" >/dev/null; then
+				removed_snaps=$(( removed_snaps + 1 ))
+				snap_bytes=$(( snap_bytes + snap_rev_bytes ))
+			else
+				echo -e "${YELLOW}  snap remove refused, left alone: $snap_name r$snap_rev${RESET}"
+			fi
+		done
+
+		if (( removed_snaps > 0 )); then
+			record_path_cleanup "$snap_bytes"
+			echo -e "  ${GREEN}✓ Removed $removed_snaps disabled revision(s) (deletion estimate: $(format_bytes "$snap_bytes"))${RESET}"
 		else
 			echo -e "${YELLOW}  Nothing was removed.${RESET}"
 		fi
