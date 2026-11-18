@@ -777,11 +777,41 @@ collect_stale_claude_worktrees() {
 	done
 }
 
+# Copilot CLI unpacks every update into <root>/pkg/<platform>/<version>/ and
+# never removes the previous one, at about 250 MB a release. Current releases
+# use the XDG cache (~/.cache/copilot/pkg/linux-x64); older ones used
+# ~/.copilot/pkg/universal. Section 14 once checked only the old path, which
+# left 41 versions (8.2 GB) in the cache unseen. Print one platform folder
+# per line, from both roots.
+copilot_pkg_dirs() {
+	local root
+	local dir
+	for root in "${XDG_CACHE_HOME:-$HOME/.cache}/copilot/pkg" "$HOME/.copilot/pkg"; do
+		for dir in "$root"/*/; do
+			dir=${dir%/}
+			[[ -d "$dir" ]] || continue
+			[[ "${dir##*/}" == tmp ]] && continue
+			printf '%s\n' "$dir"
+		done
+	done
+}
+
+# Versions in one platform folder, newest first. By version number, not by
+# mtime: ls -t would keep whichever folder was touched last.
+copilot_versions_newest_first() {
+	local entry
+	for entry in "$1"/*/; do
+		entry=${entry%/}
+		[[ -d "$entry" ]] || continue
+		printf '%s\n' "${entry##*/}"
+	done | sort -V -r
+}
+
 gather_cleanup_estimate_candidates() {
 	local PUPPETEER_DIR="$HOME/.cache/puppeteer/chrome"
 	local PUPPETEER_HEADLESS_DIR="$HOME/.cache/puppeteer/chrome-headless-shell"
 	local SELENIUM_CD_DIR="$HOME/.cache/selenium/chromedriver/linux64"
-	local COPILOT_PKG_DIR="$HOME/.copilot/pkg/universal"
+	local COPILOT_PKG_DIR
 	local COPILOT_SESSIONS_DIR="$HOME/.copilot/session-state"
 	local SESSIONS_KEEP=5
 	local EXT_DIR="$HOME/.vscode/extensions"
@@ -873,14 +903,14 @@ gather_cleanup_estimate_candidates() {
 		fi
 	fi
 
-	if [[ -d "$COPILOT_PKG_DIR" ]]; then
-		mapfile -t versions < <(ls -1t "$COPILOT_PKG_DIR")
+	while IFS= read -r COPILOT_PKG_DIR; do
+		mapfile -t versions < <(copilot_versions_newest_first "$COPILOT_PKG_DIR")
 		if [[ "${#versions[@]}" -gt 1 ]]; then
 			for v in "${versions[@]:1}"; do
 				append_cleanup_candidates "$COPILOT_PKG_DIR/$v"
 			done
 		fi
-	fi
+	done < <(copilot_pkg_dirs)
 
 	if [[ -d "$COPILOT_SESSIONS_DIR" ]]; then
 		mapfile -t all_sessions < <(ls -1t "$COPILOT_SESSIONS_DIR")
@@ -1518,37 +1548,48 @@ fi
 
 print_header "GitHub Copilot CLI — old versions"
 
-COPILOT_PKG_DIR="$HOME/.copilot/pkg/universal"
+mapfile -t copilot_pkg_dir_list < <(copilot_pkg_dirs)
+old_version_paths=()
 
-if [[ ! -d "$COPILOT_PKG_DIR" ]]; then
-	echo -e "${YELLOW}  Not found, skipping: $COPILOT_PKG_DIR${RESET}"
+if [[ "${#copilot_pkg_dir_list[@]}" -eq 0 ]]; then
+	echo -e "${YELLOW}  Not found, skipping: ${XDG_CACHE_HOME:-$HOME/.cache}/copilot/pkg, $HOME/.copilot/pkg${RESET}"
 else
-	mapfile -t versions < <(ls -1t "$COPILOT_PKG_DIR")
-	count="${#versions[@]}"
-
-	if [[ "$count" -le 1 ]]; then
-		echo -e "  Only one version present, nothing to delete."
-	else
-		newest="${versions[0]}"
-		old_versions=("${versions[@]:1}")
-		old_version_paths=()
-		echo -e "  Keeping : ${BOLD}$newest${RESET}"
-		echo -e "  To delete (${#old_versions[@]} older versions):"
-		for v in "${old_versions[@]}"; do
+	# Keep the newest version in each platform folder; offer the rest.
+	for COPILOT_PKG_DIR in "${copilot_pkg_dir_list[@]}"; do
+		mapfile -t versions < <(copilot_versions_newest_first "$COPILOT_PKG_DIR")
+		[[ "${#versions[@]}" -eq 0 ]] && continue
+		echo -e "  ${COPILOT_PKG_DIR/#$HOME/\~}"
+		echo -e "    Keeping : ${BOLD}${versions[0]}${RESET}"
+		for v in "${versions[@]:1}"; do
 			path="$COPILOT_PKG_DIR/$v"
 			old_version_paths+=("$path")
 			echo -e "    - $v  ($(path_size "$path"))"
 		done
+	done
+
+	if [[ "${#old_version_paths[@]}" -eq 0 ]]; then
+		echo -e "  Only the newest version is present, nothing to delete."
+	else
+		echo -e "  To delete: ${#old_version_paths[@]} older version(s)"
 		estimated_bytes=$(estimate_deletion_bytes "${old_version_paths[@]}")
 		estimated_size=$(format_bytes "$estimated_bytes")
 		print_deletion_estimate "$estimated_bytes"
 
 		if confirm "  Delete older versions?"; then
-			for v in "${old_versions[@]}"; do
-				rm -rf "${COPILOT_PKG_DIR:?}/$v"
+			deleted=0
+			failed=0
+			for path in "${old_version_paths[@]}"; do
+				if rm -rf "${path:?}"; then
+					deleted=$(( deleted + 1 ))
+				else
+					failed=$(( failed + 1 ))
+				fi
 			done
 			record_path_cleanup "$estimated_bytes"
-			echo -e "  ${GREEN}✓ Deleted ${#old_versions[@]} older version(s) (deletion estimate: $estimated_size)${RESET}"
+			echo -e "  ${GREEN}✓ Deleted $deleted older version(s) (deletion estimate: $estimated_size)${RESET}"
+			if [[ "$failed" -gt 0 ]]; then
+				echo -e "  ${YELLOW}Could not delete $failed version(s)${RESET}"
+			fi
 		else
 			echo -e "  Skipped."
 		fi
